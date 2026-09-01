@@ -368,9 +368,15 @@ String getHTMLHeader(const char* activeTab) {
   html += ".nav a{padding:12px 20px;background:#2a2a2a;color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;font-size:15px;}";
   html += ".nav a.active{background:#00e676;color:#000;}";
   html += ".card{background:#1e1e1e;border-radius:12px;padding:20px;margin:15px auto;max-width:440px;box-shadow:0 4px 10px rgba(0,0,0,0.5);}";
+  html += ".wifi-item{display:flex;justify-content:space-between;align-items:center;padding:12px;margin:8px 0;background:#2a2a2a;border-radius:8px;cursor:pointer;text-align:left;border:2px solid transparent;}";
+  html += ".wifi-item.saved{border-color:#00e676;background:#1b382b;}";
+  html += ".wifi-item:hover{background:#3a3a3a;}";
+  html += ".badge{padding:4px 8px;border-radius:6px;font-size:12px;font-weight:bold;}";
+  html += ".badge-saved{background:#00e676;color:#000;}";
+  html += ".badge-open{background:#ffb300;color:#000;}";
   html += "input,select{width:90%;padding:12px;margin:6px 0;border-radius:6px;border:none;background:#2a2a2a;color:#fff;font-size:16px;}";
   html += ".btn{padding:14px 28px;font-size:16px;background:#00e676;color:#000;border:none;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;font-weight:bold;}";
-  html += ".btn-scan{background:#29b6f6;color:#000;margin-bottom:10px;}";
+  html += ".btn-scan{background:#29b6f6;color:#000;margin-bottom:15px;}";
   html += ".btn-off{background:#ff5252;color:#fff;}</style>";
 
   if (String(activeTab) == "data") {
@@ -402,6 +408,13 @@ String getHTMLHeader(const char* activeTab) {
     html += "setInterval(updateStatus, 2000);";
     html += "</script>";
   }
+
+  html += "<script>";
+  html += "function selectSSID(ssid){";
+  html += "  document.getElementById('wifi_ssid_input').value = ssid;";
+  html += "  document.getElementById('wifi_pass_input').focus();";
+  html += "}";
+  html += "</script>";
 
   html += "</head><body>";
   html += "<h1>🚀 ESP32-C3 P1 Okosmérő</h1>";
@@ -443,35 +456,48 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
-// 2. BEÁLLÍTÁSOK OLDAL: Külön a Wi-Fi és MQTT konfiguráció
+// 2. BEÁLLÍTÁSOK OLDAL: Ubuntu stílusú Wi-Fi Hálózat Választó + "ELMENTVE / KAPCSOLÓDVA" jelzés
 void handleSettingsPage() {
   String html = getHTMLHeader("settings");
 
   html += "<div class='card'>";
-  html += "<h2>📶 Wi-Fi Hálózat Beállítása</h2>";
+  html += "<h2>📶 Wi-Fi Hálózat Választó (Ubuntu Stílus)</h2>";
   html += "<p><a href='/scan' class='btn btn-scan'>🔍 Wi-Fi Hálózatok Keresése</a></p>";
-  html += "<form method='POST' action='/config'>";
 
   int n = WiFi.scanComplete();
   if (n >= 0) {
-    html += "<p style='text-align:left;margin-left:5%;'><b>Látható Wi-Fi Hálózatok (" + String(n) + " találat):</b></p>";
-    html += "<select name='wifi_ssid' required>";
-    html += "<option value=''>-- Válassz Hálózatot --</option>";
+    html += "<div style='max-height:260px;overflow-y:auto;margin-bottom:15px;'>";
     for (int i = 0; i < n; ++i) {
-      String networkSSID = WiFi.SSID(i);
+      String netSSID = WiFi.SSID(i);
       int rssi = WiFi.RSSI(i);
       int pct = getRssiPercent(rssi);
-      String isSelected = (networkSSID == wifi_ssid) ? " selected" : "";
-      html += "<option value='" + networkSSID + "'" + isSelected + ">" + networkSSID + " (" + String(pct) + "% / " + String(rssi) + " dBm)</option>";
+      bool isSaved = (netSSID == wifi_ssid);
+
+      html += "<div class='wifi-item " + String(isSaved ? "saved" : "") + "' onclick='selectSSID(\"" + netSSID + "\")'>";
+      html += "<div>";
+      html += "<div style='font-size:16px;font-weight:bold;'>" + netSSID + "</div>";
+      html += "<div style='font-size:12px;color:#aaa;'>Jelerősség: " + String(pct) + "% (" + String(rssi) + " dBm)</div>";
+      html += "</div>";
+      html += "<div>";
+      if (isSaved) {
+        if (WiFi.status() == WL_CONNECTED) {
+          html += "<span class='badge badge-saved'>✓ KAPCSOLÓDVA</span>";
+        } else {
+          html += "<span class='badge badge-saved'>✓ ELMENTVE</span>";
+        }
+      }
+      html += "</div>";
+      html += "</div>";
     }
-    html += "</select>";
-  } else {
-    html += "<p style='text-align:left;margin-left:5%;'><b>Wi-Fi SSID (Hálózat neve):</b></p>";
-    html += "<input type='text' name='wifi_ssid' value='" + String(wifi_ssid) + "' placeholder='Írd be a Wi-Fi nevét' required>";
+    html += "</div>";
   }
 
+  html += "<form method='POST' action='/config'>";
+  html += "<p style='text-align:left;margin-left:5%;'><b>Kiválasztott Wi-Fi SSID:</b></p>";
+  html += "<input type='text' id='wifi_ssid_input' name='wifi_ssid' value='" + String(wifi_ssid) + "' placeholder='Válassz a fenti listából vagy írd be' required>";
+
   html += "<p style='text-align:left;margin-left:5%;margin-top:10px;'><b>Wi-Fi Jelszó:</b></p>";
-  html += "<input type='password' name='wifi_pass' value='" + String(wifi_pass) + "' placeholder='Add meg a Wi-Fi jelszót'>";
+  html += "<input type='password' id='wifi_pass_input' name='wifi_pass' value='" + String(wifi_pass) + "' placeholder='Add meg a Wi-Fi jelszót'>";
 
   html += "<h2 style='margin-top:25px;'>🔌 MQTT Broker Beállítások</h2>";
   html += "<p style='text-align:left;margin-left:5%;'><b>MQTT Szerver IP:</b></p>";
@@ -491,7 +517,7 @@ void handleSettingsPage() {
   server.send(200, "text/html", html);
 }
 
-// 3. RENDSZER STÁTUSZ OLDAL: Külön a technikai adatok és állapotok
+// 3. RENDSZER STÁTUSZ OLDAL
 void handleStatusPage() {
   float tempC = getChipTemperature();
   String html = getHTMLHeader("status");
@@ -590,9 +616,9 @@ void setup() {
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
 
-  server.on("/", handleRoot);                  // 1. Főoldal: Kizárólag az élő adatok
-  server.on("/settings", handleSettingsPage);  // 2. Beállítások oldal
-  server.on("/status", handleStatusPage);      // 3. Rendszer Státusz oldal
+  server.on("/", handleRoot);
+  server.on("/settings", handleSettingsPage);
+  server.on("/status", handleStatusPage);
   server.on("/api/data", handleApiData);
   server.on("/scan", handleScan);
   server.on("/config", HTTP_POST, handleConfigSave);
