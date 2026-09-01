@@ -14,6 +14,10 @@
 #define EXT_BUTTON_PIN   4
 #define LED_PIN          8
 
+// P1 Okosmérő (DSMR) Csatlakozás
+#define P1_RX_PIN        3  // RJ12 Pin 5 (Inverted Data) -> ESP32-C3 GPIO3
+#define P1_RTS_PIN       7  // RJ12 Pin 2 (Data Request)  -> ESP32-C3 GPIO7 (HIGH)
+
 #define SCREEN_WIDTH     128
 #define SCREEN_HEIGHT    64
 
@@ -30,6 +34,7 @@ const char* password = "1qaw3ed-";
 char mqtt_server[64] = "192.168.0.140";
 int mqtt_port = 1883;
 const char* mqtt_topic_telemetry = "esp32c3/supermini/telemetry";
+const char* mqtt_topic_p1 = "esp32c3/p1/telegram";
 const char* mqtt_topic_state = "esp32c3/supermini/state";
 const char* mqtt_topic_cmd = "esp32c3/supermini/cmd";
 
@@ -41,6 +46,13 @@ unsigned long lastDebounceTime = 0;
 unsigned long lastMqttPublish = 0;
 unsigned long lastMqttReconnectAttempt = 0;
 bool tempSensorInitialized = false;
+
+// P1 Mérőműszer adatok
+float p1_current_power_kw = 0.0;    // 1-0:1.7.0 (Aktuális fogyasztás kW)
+float p1_total_energy_kwh = 0.0;    // 1-0:1.8.0 / 1.8.1 (Összes fogyasztás kWh)
+float p1_current_export_kw = 0.0;   // 1-0:2.7.0 (Aktuális betáplálás kW)
+int p1_telegram_count = 0;
+String p1_raw_buffer = "";
 
 int getRssiPercent(int rssi) {
   if (rssi <= -100) return 0;
@@ -86,29 +98,28 @@ void updateOLED() {
   // 1. Fejléc
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.println("ESP32-C3 Telemetria");
+  display.println("ESP32-C3 P1 Meter");
   display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 
   if (WiFi.status() == WL_CONNECTED) {
     int rssi = WiFi.RSSI();
     float tempC = getChipTemperature();
 
-    // 2. IP Cím
+    // 2. IP Cím & P1 Telegram számláló
     display.setCursor(0, 13);
-    display.print("IP: ");
-    display.println(WiFi.localIP());
+    display.printf("IP:%s P1:#%d\n", WiFi.localIP().toString().c_str(), p1_telegram_count);
 
-    // 3. Chip Hőmérséklet & Szabad RAM
+    // 3. P1 Aktuális Teljesítmény (kW / W)
     display.setCursor(0, 25);
-    display.printf("Temp: %.1fC | RAM:%dKB\n", tempC, ESP.getFreeHeap() / 1024);
+    display.printf("P1 Pwr: %.3f kW\n", p1_current_power_kw);
 
-    // 4. WiFi Jelerősség & MQTT Státusz
+    // 4. P1 Összes Fogyasztás (kWh)
     display.setCursor(0, 37);
-    display.printf("WiFi: %d%% | MQTT:%s\n", getRssiPercent(rssi), mqttClient.connected() ? "OK" : "KI");
+    display.printf("P1 Sum: %.1f kWh\n", p1_total_energy_kwh);
 
-    // 5. Gomb & LED állapot
+    // 5. Hőmérséklet & Wi-Fi
     display.setCursor(0, 49);
-    display.printf("Gomb: %d  |  LED: %s\n", buttonPressCount, ledState ? "BE" : "KI");
+    display.printf("Temp:%.1fC | WiFi:%d%%\n", tempC, getRssiPercent(rssi));
   } else {
     display.setCursor(0, 20);
     display.setTextSize(1);
@@ -120,9 +131,55 @@ void updateOLED() {
 
   // Alsó Uptime sáv
   display.setCursor(0, 57);
-  display.printf("Up: %lus | Reset: %s\n", millis() / 1000, getResetReasonString());
+  display.printf("Up: %lus | MQTT:%s\n", millis() / 1000, mqttClient.connected() ? "OK" : "KI");
 
   display.display();
+}
+
+void parseP1Line(String line) {
+  // 1-0:1.7.0(00.450*kW) -> Aktuális fogyasztás
+  if (line.indexOf("1-0:1.7.0") >= 0) {
+    int start = line.indexOf('(');
+    int end = line.indexOf("*kW");
+    if (start >= 0 && end > start) {
+      p1_current_power_kw = line.substring(start + 1, end).toFloat();
+    }
+  }
+  // 1-0:1.8.1(001234.567*kWh) vagy 1-0:1.8.0 -> Összes fogyasztás
+  else if (line.indexOf("1-0:1.8.1") >= 0 || line.indexOf("1-0:1.8.0") >= 0) {
+    int start = line.indexOf('(');
+    int end = line.indexOf("*kWh");
+    if (start >= 0 && end > start) {
+      p1_total_energy_kwh = line.substring(start + 1, end).toFloat();
+    }
+  }
+  // 1-0:2.7.0(00.000*kW) -> Aktuális napelem/visszatáplálás
+  else if (line.indexOf("2-0:2.7.0") >= 0 || line.indexOf("1-0:2.7.0") >= 0) {
+    int start = line.indexOf('(');
+    int end = line.indexOf("*kW");
+    if (start >= 0 && end > start) {
+      p1_current_export_kw = line.substring(start + 1, end).toFloat();
+    }
+  }
+}
+
+void readP1Serial() {
+  while (Serial1.available()) {
+    char c = (char)Serial1.read();
+    p1_raw_buffer += c;
+
+    if (c == '\n') {
+      p1_raw_buffer.trim();
+      if (p1_raw_buffer.startsWith("!")) { // P1 Telegram vége (!)
+        p1_telegram_count++;
+        Serial.printf("⚡ P1 Telegram #%d beérkezett!\n", p1_telegram_count);
+        updateOLED();
+      } else {
+        parseP1Line(p1_raw_buffer);
+      }
+      p1_raw_buffer = "";
+    }
+  }
 }
 
 void publishMQTTTelemetry() {
@@ -141,6 +198,10 @@ void publishMQTTTelemetry() {
   payload += "\"wifi_rssi_pct\":" + String(getRssiPercent(rssi)) + ",";
   payload += "\"button_press_count\":" + String(buttonPressCount) + ",";
   payload += "\"led_state\":\"" + String(ledState ? "ON" : "OFF") + "\",";
+  payload += "\"p1_current_power_kw\":" + String(p1_current_power_kw, 3) + ",";
+  payload += "\"p1_total_energy_kwh\":" + String(p1_total_energy_kwh, 1) + ",";
+  payload += "\"p1_current_export_kw\":" + String(p1_current_export_kw, 3) + ",";
+  payload += "\"p1_telegram_count\":" + String(p1_telegram_count) + ",";
   payload += "\"ip_address\":\"" + WiFi.localIP().toString() + "\",";
   payload += "\"mac_address\":\"" + WiFi.macAddress() + "\",";
   payload += "\"reset_reason\":\"" + String(getResetReasonString()) + "\",";
@@ -149,17 +210,17 @@ void publishMQTTTelemetry() {
 
   mqttClient.publish(mqtt_topic_telemetry, payload.c_str());
   mqttClient.publish(mqtt_topic_state, ledState ? "ON" : "OFF");
-  Serial.println("📤 MQTT Telemetria kiküldve: " + payload);
+  Serial.println("📤 MQTT Telemetria + P1 adatok kiküldve: " + payload);
 }
 
 void reconnectMQTT() {
   if (WiFi.status() != WL_CONNECTED) return;
 
   if (!mqttClient.connected()) {
-    if (millis() - lastMqttReconnectAttempt > 10000) { // 10mp-enként próbálkozik háttérben
+    if (millis() - lastMqttReconnectAttempt > 10000) {
       lastMqttReconnectAttempt = millis();
       Serial.printf("🔌 Csatlakozási kísérlet MQTT brokerhez (%s:%d)...\n", mqtt_server, mqtt_port);
-      String clientId = "ESP32C3-SuperMini-" + String(random(0xffff), HEX);
+      String clientId = "ESP32C3-P1Reader-" + String(random(0xffff), HEX);
       if (mqttClient.connect(clientId.c_str())) {
         Serial.println("✅ Sikeres MQTT csatlakozás!");
         mqttClient.subscribe(mqtt_topic_cmd);
@@ -176,7 +237,6 @@ void mqttCallback(char* topic, byte* message, unsigned int length) {
   for (unsigned int i = 0; i < length; i++) {
     messageTemp += (char)message[i];
   }
-  Serial.printf("📩 MQTT Üzenet érkezett [%s]: %s\n", topic, messageTemp.c_str());
 
   if (String(topic) == mqtt_topic_cmd) {
     if (messageTemp == "ON" || messageTemp == "1") {
@@ -193,32 +253,38 @@ void mqttCallback(char* topic, byte* message, unsigned int length) {
 
 void handleRoot() {
   float tempC = getChipTemperature();
-  String html = "<html><head><title>ESP32-C3 SuperMini Telemetry Dashboard</title>";
+  String html = "<html><head><title>ESP32-C3 P1 Smart Meter Dashboard</title>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
   html += "<style>body{font-family:Arial;text-align:center;margin-top:30px;background:#121212;color:#fff;}";
-  html += ".card{background:#1e1e1e;border-radius:12px;padding:20px;margin:15px auto;max-width:400px;box-shadow:0 4px 10px rgba(0,0,0,0.5);}";
+  html += ".card{background:#1e1e1e;border-radius:12px;padding:20px;margin:15px auto;max-width:420px;box-shadow:0 4px 10px rgba(0,0,0,0.5);}";
   html += ".btn{padding:15px 30px;font-size:18px;background:#00e676;color:#000;border:none;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;}";
   html += ".btn-off{background:#ff5252;color:#fff;}</style></head><body>";
-  html += "<h1>🚀 ESP32-C3 Telemetry Dashboard</h1>";
+  html += "<h1>⚡ ESP32-C3 P1 Okosm&eacute;r&odblac; Dashboard</h1>";
 
   html += "<div class='card'>";
-  html += "<h2>📊 Rendszer Adatok</h2>";
-  html += "<p><b>Belső Hőmérséklet:</b> " + String(tempC, 1) + " &deg;C</p>";
-  html += "<p><b>Szabad RAM:</b> " + String(ESP.getFreeHeap() / 1024) + " KB / " + String(ESP.getMinFreeHeap() / 1024) + " KB (min)</p>";
-  html += "<p><b>Wi-Fi Jelerősség:</b> " + String(WiFi.RSSI()) + " dBm (" + String(getRssiPercent(WiFi.RSSI())) + "%)</p>";
-  html += "<p><b>Reset Ok:</b> " + String(getResetReasonString()) + "</p>";
-  html += "<p><b>MAC Cím:</b> " + WiFi.macAddress() + "</p>";
-  html += "<p><b>MQTT Broker:</b> " + String(mqtt_server) + ":" + String(mqtt_port) + " (" + (mqttClient.connected() ? "KAPCSOLÓDVA" : "LECSATLAKOZVA") + ")</p>";
+  html += "<h2>⚡ P1 Okosm&eacute;r&odblac; Adatok</h2>";
+  html += "<p><b>Aktu&aacute;lis Fogyaszt&aacute;s:</b> <span style='font-size:24px;color:#00e676;'>" + String(p1_current_power_kw, 3) + " kW</span></p>";
+  html += "<p><b>&Ouml;sszes Fogyaszt&aacute;s:</b> " + String(p1_total_energy_kwh, 1) + " kWh</p>";
+  html += "<p><b>Visszat&aacute;pl&aacute;l&aacute;s (Napelem):</b> " + String(p1_current_export_kw, 3) + " kW</p>";
+  html += "<p><b>Fogadott Telegramok:</b> #" + String(p1_telegram_count) + "</p>";
   html += "</div>";
 
   html += "<div class='card'>";
-  html += "<h2>💡 Vezérlés</h2>";
+  html += "<h2>📊 Rendszer Adatok</h2>";
+  html += "<p><b>Belső Hőm&eacute;rs&eacute;klet:</b> " + String(tempC, 1) + " &deg;C</p>";
+  html += "<p><b>Szabad RAM:</b> " + String(ESP.getFreeHeap() / 1024) + " KB</p>";
+  html += "<p><b>Wi-Fi Jeler&odblac;ss&eacute;g:</b> " + String(WiFi.RSSI()) + " dBm (" + String(getRssiPercent(WiFi.RSSI())) + "%)</p>";
+  html += "<p><b>MQTT Broker:</b> " + String(mqtt_server) + ":" + String(mqtt_port) + " (" + (mqttClient.connected() ? "KAPCSOL&Oacute;DVA" : "LECSATLAKOZVA") + ")</p>";
+  html += "</div>";
+
+  html += "<div class='card'>";
+  html += "<h2>💡 Vez&eacute;rl&eacute;s</h2>";
   html += "<p><b>Gomb megnyomva:</b> " + String(buttonPressCount) + " alkalommal</p>";
-  html += "<p><b>Fedélzeti LED:</b> " + String(ledState ? "BEKAPCSOLVA" : "KIKAPCSOLVA") + "</p>";
+  html += "<p><b>Fed&eacute;lzeti LED:</b> " + String(ledState ? "BEKAPCSOLVA" : "KIKAPCSOLVA") + "</p>";
   if (ledState) {
-    html += "<p><a href='/led/off' class='btn btn-off'>LED KIKAPCSOLÁSA</a></p>";
+    html += "<p><a href='/led/off' class='btn btn-off'>LED KIKAPCSOL&Aacute;SA</a></p>";
   } else {
-    html += "<p><a href='/led/on' class='btn'>LED BEKAPCSOLÁSA</a></p>";
+    html += "<p><a href='/led/on' class='btn'>LED BEKAPCSOL&Aacute;SA</a></p>";
   }
   html += "</div>";
 
@@ -261,7 +327,15 @@ void setup() {
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
   pinMode(EXT_BUTTON_PIN, INPUT_PULLUP);
 
+  // P1 Port Data Request (RTS Pin 2) beállítása kimenetként (HIGH = Engedélyezés)
+  pinMode(P1_RTS_PIN, OUTPUT);
+  digitalWrite(P1_RTS_PIN, HIGH);
+
   Serial.begin(115200);
+
+  // P1 Port Hardware UART1 inicializálása GPIO3-on hardveres jelinverzióval (invert = true, DSMR 5.0 115200 8N1)
+  Serial1.begin(115200, SERIAL_8N1, P1_RX_PIN, -1, true);
+  Serial.println("⚡ P1 Port UART1 felállt a GPIO3 lábon (hardveresen invertált jel, 115200 baud)!");
 
   initTempSensor();
 
@@ -292,6 +366,7 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  readP1Serial(); // P1 Port olvasása
 
   if (WiFi.status() == WL_CONNECTED) {
     if (!mqttClient.connected()) {
