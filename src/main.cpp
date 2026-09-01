@@ -61,9 +61,6 @@ unsigned long lastMqttPublish = 0;
 unsigned long lastMqttReconnectAttempt = 0;
 bool tempSensorInitialized = false;
 
-// Wi-Fi pásztázás eredmények
-int scannedNetworkCount = -1;
-
 // P1 Mérőműszer adatok
 float p1_current_power_kw = 0.0;
 float p1_total_energy_kwh = 0.0;
@@ -78,7 +75,7 @@ int getRssiPercent(int rssi) {
 }
 
 void loadSettings() {
-  preferences.begin("settings", false); // nvs_open read/write mode for namespace creation
+  preferences.begin("settings", false);
   String s_ssid = preferences.getString("ssid", "");
   String s_pass = preferences.getString("pass", "");
   String s_mqtt = preferences.getString("mqtt_ip", "192.168.0.253");
@@ -336,37 +333,84 @@ void handleConfigSave() {
   server.send(303);
 }
 
+// Élő JSON API Végpont az automatikus frissítéshez
+void handleApiData() {
+  float tempC = getChipTemperature();
+  int freeRamKb = ESP.getFreeHeap() / 1024;
+  int rssi = WiFi.RSSI();
+
+  String json = "{";
+  json += "\"temp_c\":" + String(tempC, 1) + ",";
+  json += "\"free_ram_kb\":" + String(freeRamKb) + ",";
+  json += "\"rssi_dbm\":" + String(rssi) + ",";
+  json += "\"rssi_pct\":" + String(getRssiPercent(rssi)) + ",";
+  json += "\"button_count\":" + String(buttonPressCount) + ",";
+  json += "\"led_state\":\"" + String(ledState ? "BEKAPCSOLVA" : "KIKAPCSOLVA") + "\",";
+  json += "\"p1_power_kw\":" + String(p1_current_power_kw, 3) + ",";
+  json += "\"p1_total_kwh\":" + String(p1_total_energy_kwh, 1) + ",";
+  json += "\"p1_export_kw\":" + String(p1_current_export_kw, 3) + ",";
+  json += "\"p1_telegrams\":" + String(p1_telegram_count) + ",";
+  json += "\"sta_ip\":\"" + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Csatlakozás...") + "\",";
+  json += "\"mqtt_status\":\"" + String(mqttClient.connected() ? "KAPCSOLÓDVA" : "Nem Elérhető") + "\",";
+  json += "\"uptime_sec\":" + String(millis() / 1000);
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
 void handleRoot() {
   float tempC = getChipTemperature();
 
-  String html = "<html><head><title>ESP32-C3 Smart Meter Config & Dashboard</title>";
+  String html = "<!DOCTYPE html><html lang='hu'><head><meta charset='UTF-8'>";
+  html += "<title>ESP32-C3 P1 Okosmérő Dashboard</title>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<style>body{font-family:Arial;text-align:center;margin-top:20px;background:#121212;color:#fff;}";
+  html += "<style>body{font-family:Arial,sans-serif;text-align:center;margin-top:20px;background:#121212;color:#fff;}";
   html += ".card{background:#1e1e1e;border-radius:12px;padding:20px;margin:15px auto;max-width:440px;box-shadow:0 4px 10px rgba(0,0,0,0.5);}";
   html += "input,select{width:90%;padding:12px;margin:6px 0;border-radius:6px;border:none;background:#2a2a2a;color:#fff;font-size:16px;}";
   html += ".btn{padding:14px 28px;font-size:16px;background:#00e676;color:#000;border:none;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;font-weight:bold;}";
   html += ".btn-scan{background:#29b6f6;color:#000;margin-bottom:10px;}";
-  html += ".btn-off{background:#ff5252;color:#fff;}</style></head><body>";
-  html += "<h1>📡 ESP32-C3 P1 Okosm&eacute;r&odblac;</h1>";
+  html += ".btn-off{background:#ff5252;color:#fff;}</style>";
+
+  // 2 Másodperces Élő Auto-Refresh JavaScript Ciklus (Oldalújratöltés Nélkül)
+  html += "<script>";
+  html += "function updateData(){";
+  html += "  fetch('/api/data').then(r=>r.json()).then(d=>{";
+  html += "    document.getElementById('p1_power').innerText = d.p1_power_kw.toFixed(3) + ' kW';";
+  html += "    document.getElementById('p1_total').innerText = d.p1_total_kwh.toFixed(1) + ' kWh';";
+  html += "    document.getElementById('p1_export').innerText = d.p1_export_kw.toFixed(3) + ' kW';";
+  html += "    document.getElementById('p1_telegrams').innerText = '#' + d.p1_telegrams;";
+  html += "    document.getElementById('temp_c').innerText = d.temp_c + ' °C';";
+  html += "    document.getElementById('free_ram').innerText = d.free_ram_kb + ' KB';";
+  html += "    document.getElementById('wifi_rssi').innerText = d.rssi_dbm + ' dBm (' + d.rssi_pct + '%)';";
+  html += "    document.getElementById('mqtt_status').innerText = d.mqtt_status;";
+  html += "    document.getElementById('mqtt_status').style.color = (d.mqtt_status==='KAPCSOLÓDVA') ? '#00e676' : '#ff5252';";
+  html += "    document.getElementById('btn_count').innerText = d.button_count;";
+  html += "    document.getElementById('led_status').innerText = d.led_state;";
+  html += "  }).catch(e=>console.log(e));";
+  html += "}";
+  html += "setInterval(updateData, 2000);";
+  html += "</script></head><body>";
+
+  html += "<h1>🚀 ESP32-C3 P1 Okosmérő</h1>";
 
   html += "<div class='card'>";
-  html += "<h2>⚡ P1 Okosm&eacute;r&odblac; Adatok</h2>";
-  html += "<p><b>Aktu&aacute;lis Fogyaszt&aacute;s:</b> <span style='font-size:24px;color:#00e676;'>" + String(p1_current_power_kw, 3) + " kW</span></p>";
-  html += "<p><b>&Ouml;sszes Fogyaszt&aacute;s:</b> " + String(p1_total_energy_kwh, 1) + " kWh</p>";
-  html += "<p><b>Visszat&aacute;pl&aacute;l&aacute;s (Napelem):</b> " + String(p1_current_export_kw, 3) + " kW</p>";
-  html += "<p><b>Fogadott Telegramok:</b> #" + String(p1_telegram_count) + "</p>";
+  html += "<h2>⚡ P1 Okosmérő Adatok (Élő)</h2>";
+  html += "<p><b>Aktuális Fogyasztás:</b> <span id='p1_power' style='font-size:26px;color:#00e676;font-weight:bold;'>" + String(p1_current_power_kw, 3) + " kW</span></p>";
+  html += "<p><b>Összes Fogyasztás:</b> <span id='p1_total'>" + String(p1_total_energy_kwh, 1) + " kWh</span></p>";
+  html += "<p><b>Visszatáplálás (Napelem):</b> <span id='p1_export'>" + String(p1_current_export_kw, 3) + " kW</span></p>";
+  html += "<p><b>Fogadott Telegramok:</b> <span id='p1_telegrams'>#" + String(p1_telegram_count) + "</span></p>";
   html += "</div>";
 
   html += "<div class='card'>";
-  html += "<h2>📶 Wi-Fi H&aacute;l&oacute;zat Be&aacute;ll&iacute;t&aacute;sa</h2>";
-  html += "<p><a href='/scan' class='btn btn-scan'>🔍 Wi-Fi H&aacute;l&oacute;zatok Keres&eacute;se</a></p>";
+  html += "<h2>📶 Wi-Fi Hálózat Beállítása</h2>";
+  html += "<p><a href='/scan' class='btn btn-scan'>🔍 Wi-Fi Hálózatok Keresése</a></p>";
   html += "<form method='POST' action='/config'>";
 
   int n = WiFi.scanComplete();
   if (n >= 0) {
-    html += "<p style='text-align:left;margin-left:5%;'><b>L&aacute;that&oacute; Wi-Fi H&aacute;l&oacute;zatok (" + String(n) + " tal&aacute;lat):</b></p>";
+    html += "<p style='text-align:left;margin-left:5%;'><b>Látható Wi-Fi Hálózatok (" + String(n) + " találat):</b></p>";
     html += "<select name='wifi_ssid' required>";
-    html += "<option value=''>-- V&aacute;lassz H&aacute;l&oacute;zatot --</option>";
+    html += "<option value=''>-- Válassz Hálózatot --</option>";
     for (int i = 0; i < n; ++i) {
       String networkSSID = WiFi.SSID(i);
       int rssi = WiFi.RSSI(i);
@@ -376,45 +420,45 @@ void handleRoot() {
     }
     html += "</select>";
   } else {
-    html += "<p style='text-align:left;margin-left:5%;'><b>Wi-Fi SSID (H&aacute;l&oacute;zat neve):</b></p>";
-    html += "<input type='text' name='wifi_ssid' value='" + String(wifi_ssid) + "' placeholder='Írd be vagy keresd ki a Wi-Fi nev&eacute;t' required>";
+    html += "<p style='text-align:left;margin-left:5%;'><b>Wi-Fi SSID (Hálózat neve):</b></p>";
+    html += "<input type='text' name='wifi_ssid' value='" + String(wifi_ssid) + "' placeholder='Írd be a Wi-Fi nevét' required>";
   }
 
-  html += "<p style='text-align:left;margin-left:5%;margin-top:10px;'><b>Wi-Fi Jelsz&oacute;:</b></p>";
-  html += "<input type='password' name='wifi_pass' value='" + String(wifi_pass) + "' placeholder='Add meg a Wi-Fi jelsz&oacute;t'>";
+  html += "<p style='text-align:left;margin-left:5%;margin-top:10px;'><b>Wi-Fi Jelszó:</b></p>";
+  html += "<input type='password' name='wifi_pass' value='" + String(wifi_pass) + "' placeholder='Add meg a Wi-Fi jelszót'>";
 
-  html += "<h2 style='margin-top:25px;'>🔌 MQTT Broker Be&aacute;ll&iacute;t&aacute;sok</h2>";
+  html += "<h2 style='margin-top:25px;'>🔌 MQTT Broker Beállítások</h2>";
   html += "<p style='text-align:left;margin-left:5%;'><b>MQTT Szerver IP:</b></p>";
   html += "<input type='text' name='mqtt_server' value='" + String(mqtt_server) + "' placeholder='pl. 192.168.0.253' required>";
   html += "<p style='text-align:left;margin-left:5%;'><b>Port:</b></p>";
   html += "<input type='text' name='mqtt_port' value='" + String(mqtt_port) + "'>";
-  html += "<p style='text-align:left;margin-left:5%;'><b>MQTT Felha&scedil;n&aacute;l&oacute; (opcion&aacute;lis):</b></p>";
-  html += "<input type='text' name='mqtt_user' value='" + String(mqtt_user) + "' placeholder='Felha&scedil;n&aacute;l&oacute;n&eacute;v'>";
-  html += "<p style='text-align:left;margin-left:5%;'><b>MQTT Jelsz&oacute; (opcion&aacute;lis):</b></p>";
-  html += "<input type='password' name='mqtt_pass' value='" + String(mqtt_pass) + "' placeholder='Jelsz&oacute;'>";
+  html += "<p style='text-align:left;margin-left:5%;'><b>MQTT Felhasználó (opcionális):</b></p>";
+  html += "<input type='text' name='mqtt_user' value='" + String(mqtt_user) + "' placeholder='Felhasználónév'>";
+  html += "<p style='text-align:left;margin-left:5%;'><b>MQTT Jelszó (opcionális):</b></p>";
+  html += "<input type='password' name='mqtt_pass' value='" + String(mqtt_pass) + "' placeholder='Jelszó'>";
 
-  html += "<p style='margin-top:20px;'><input type='submit' class='btn' value='Ment&eacute;s & Csatlakoz&aacute;s'></p>";
+  html += "<p style='margin-top:20px;'><input type='submit' class='btn' value='Mentés & Csatlakozás'></p>";
   html += "</form>";
   html += "</div>";
 
   html += "<div class='card'>";
-  html += "<h2>📊 Rendszer St&aacute;tusz</h2>";
-  html += "<p><b>Otthoni Wi-Fi (STA):</b> " + (WiFi.status() == WL_CONNECTED ? "<span style='color:#00e676;'>" + String(wifi_ssid) + " (" + WiFi.localIP().toString() + ")</span>" : "<span style='color:#ff5252;'>Nincs kapcsol&oacute;dva (" + String(wifi_ssid) + ")</span>") + "</p>";
-  html += "<p><b>Saj&aacute;t Hotspot (AP):</b> " + WiFi.softAPIP().toString() + " (SSID: " + String(ap_ssid) + ")</p>";
-  html += "<p><b>MQTT Broker St&aacute;tusz:</b> " + String(mqtt_server) + ":" + String(mqtt_port) + " (" + (mqttClient.connected() ? "<span style='color:#00e676;'>KAPCSOL&Oacute;DVA</span>" : "<span style='color:#ff5252;'>Nem El&eacute;rhető</span>") + ")</p>";
-  html += "<p><b>Belső Hőm&eacute;rs&eacute;klet:</b> " + String(tempC, 1) + " &deg;C</p>";
-  html += "<p><b>Szabad RAM:</b> " + String(ESP.getFreeHeap() / 1024) + " KB</p>";
-  html += "<p><b>Wi-Fi Jelerőss&eacute;g:</b> " + String(WiFi.RSSI()) + " dBm (" + String(getRssiPercent(WiFi.RSSI())) + "%)</p>";
+  html += "<h2>📊 Rendszer Státusz (Élő)</h2>";
+  html += "<p><b>Otthoni Wi-Fi (STA):</b> " + (WiFi.status() == WL_CONNECTED ? "<span style='color:#00e676;'>" + String(wifi_ssid) + " (" + WiFi.localIP().toString() + ")</span>" : "<span style='color:#ff5252;'>Nincs kapcsolódva (" + String(wifi_ssid) + ")</span>") + "</p>";
+  html += "<p><b>Saját Hotspot (AP):</b> " + WiFi.softAPIP().toString() + " (SSID: " + String(ap_ssid) + ")</p>";
+  html += "<p><b>MQTT Broker Státusz:</b> <span id='mqtt_status' style='color:" + String(mqttClient.connected() ? "#00e676" : "#ff5252") + ";'>" + String(mqttClient.connected() ? "KAPCSOLÓDVA" : "Nem Elérhető") + "</span></p>";
+  html += "<p><b>Belső Hőmérséklet:</b> <span id='temp_c'>" + String(tempC, 1) + " °C</span></p>";
+  html += "<p><b>Szabad RAM:</b> <span id='free_ram'>" + String(ESP.getFreeHeap() / 1024) + " KB</span></p>";
+  html += "<p><b>Wi-Fi Jelerősség:</b> <span id='wifi_rssi'>" + String(WiFi.RSSI()) + " dBm (" + String(getRssiPercent(WiFi.RSSI())) + "%)</span></p>";
   html += "</div>";
 
   html += "<div class='card'>";
-  html += "<h2>💡 Vez&eacute;rl&eacute;s</h2>";
-  html += "<p><b>Gomb megnyomva:</b> " + String(buttonPressCount) + " alkalommal</p>";
-  html += "<p><b>Fed&eacute;lzeti LED:</b> " + String(ledState ? "BEKAPCSOLVA" : "KIKAPCSOLVA") + "</p>";
+  html += "<h2>💡 Vezérlés</h2>";
+  html += "<p><b>Gomb megnyomva:</b> <span id='btn_count'>" + String(buttonPressCount) + "</span> alkalommal</p>";
+  html += "<p><b>Fedélzeti LED:</b> <span id='led_status'>" + String(ledState ? "BEKAPCSOLVA" : "KIKAPCSOLVA") + "</span></p>";
   if (ledState) {
-    html += "<p><a href='/led/off' class='btn btn-off'>LED KIKAPCSOL&Aacute;SA</a></p>";
+    html += "<p><a href='/led/off' class='btn btn-off'>LED KIKAPCSOLÁSA</a></p>";
   } else {
-    html += "<p><a href='/led/on' class='btn'>LED BEKAPCSOL&Aacute;SA</a></p>";
+    html += "<p><a href='/led/on' class='btn'>LED BEKAPCSOLÁSA</a></p>";
   }
   html += "</div>";
 
@@ -462,7 +506,6 @@ void setup() {
 
   Serial.begin(115200);
 
-  // NVS Memória adatok betöltése
   loadSettings();
 
   Serial1.begin(115200, SERIAL_8N1, P1_RX_PIN, -1, true);
@@ -479,7 +522,6 @@ void setup() {
     updateOLED();
   }
 
-  // 1. Wi-Fi mód beállítása (ha van mentett Wi-Fi -> AP+STA, ha nincs -> tisztán AP)
   WiFi.persistent(false);
   if (strlen(wifi_ssid) > 0) {
     WiFi.mode(WIFI_AP_STA);
@@ -488,13 +530,11 @@ void setup() {
   }
   WiFi.setTxPower(WIFI_POWER_15dBm);
 
-  // 2. Saját Access Point elindítása 1-es csatornán (192.168.4.1)
   WiFi.softAPConfig(ap_local_ip, ap_gateway, ap_subnet);
   bool apSuccess = WiFi.softAP(ap_ssid, ap_pass, 1, 0, 4);
   Serial.printf("📡 Saját Wi-Fi Hotspot: %s | IP: %s\n", 
                 apSuccess ? "Sikeres" : "Hiba", WiFi.softAPIP().toString().c_str());
 
-  // 3. Kapcsolódás a mentett Wi-Fi-re (ha van beállítva)
   if (strlen(wifi_ssid) > 0) {
     Serial.printf("📡 Kapcsolódási kísérlet a mentett Wi-Fi-re: '%s'...\n", wifi_ssid);
     WiFi.begin(wifi_ssid, wifi_pass);
@@ -504,6 +544,7 @@ void setup() {
   mqttClient.setCallback(mqttCallback);
 
   server.on("/", handleRoot);
+  server.on("/api/data", handleApiData);
   server.on("/scan", handleScan);
   server.on("/config", HTTP_POST, handleConfigSave);
   server.on("/led/on", handleLedOn);
