@@ -7,6 +7,7 @@
 #include <PubSubClient.h>
 #include <driver/temp_sensor.h>
 #include <esp_system.h>
+#include <esp_wifi.h>
 
 #define OLED_SDA_PIN     5
 #define OLED_SCL_PIN     6
@@ -30,11 +31,18 @@ PubSubClient mqttClient(espClient);
 const char* ssid = "aws01-24";
 const char* password = "1qaw3ed-";
 
-// Raspberry Pi 24/7 Helyi MQTT Broker Beállítások
-char mqtt_server[64] = "192.168.0.253"; // Raspberry Pi 24/7 MQTT Server
+// Saját Hotspot (AP Mód) Beállítások
+const char* ap_ssid = "ESP32-SuperMini";
+const char* ap_pass = "12345678";
+IPAddress ap_local_ip(192, 168, 4, 1);
+IPAddress ap_gateway(192, 168, 4, 1);
+IPAddress ap_subnet(255, 255, 255, 0);
+
+// MQTT Broker Beállítások
+char mqtt_server[64] = "192.168.0.253"; // Raspberry Pi 24/7 Server
 int mqtt_port = 1883;
-char mqtt_user[32] = "";     // Felhasználónév (ha van)
-char mqtt_pass[32] = "";     // Jelszó (ha van)
+char mqtt_user[32] = "";
+char mqtt_pass[32] = "";
 
 const char* mqtt_topic_telemetry = "esp32c3/supermini/telemetry";
 const char* mqtt_topic_p1 = "esp32c3/p1/telegram";
@@ -98,49 +106,47 @@ void updateOLED() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
-  // 1. Fejléc
+  // 1. Fejléc (Dual AP+STA Mód)
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.println("ESP32-C3 P1 Meter");
+  display.println("ESP32-C3 AP+STA Dual");
   display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 
   if (WiFi.status() == WL_CONNECTED) {
     int rssi = WiFi.RSSI();
     float tempC = getChipTemperature();
 
-    // 2. IP Cím & P1 Telegram számláló
+    // 2. Wi-Fi IP & AP IP
     display.setCursor(0, 13);
-    display.printf("IP:%s P1:#%d\n", WiFi.localIP().toString().c_str(), p1_telegram_count);
+    display.printf("STA:%s\n", WiFi.localIP().toString().c_str());
 
-    // 3. P1 Aktuális Teljesítmény (kW / W)
+    // 3. AP IP & Hotspot Név
     display.setCursor(0, 25);
+    display.printf("AP:192.168.4.1 | P1:#%d\n", p1_telegram_count);
+
+    // 4. P1 Aktuális Teljesítmény
+    display.setCursor(0, 37);
     display.printf("P1 Pwr: %.3f kW\n", p1_current_power_kw);
 
-    // 4. P1 Összes Fogyasztás (kWh)
-    display.setCursor(0, 37);
-    display.printf("P1 Sum: %.1f kWh\n", p1_total_energy_kwh);
-
-    // 5. Hőmérséklet & Wi-Fi
+    // 5. Hőmérséklet & MQTT
     display.setCursor(0, 49);
-    display.printf("Temp:%.1fC | RPi:%s\n", tempC, mqttClient.connected() ? "OK" : "AuthHiba");
+    display.printf("Temp:%.1fC | MQTT:%s\n", tempC, mqttClient.connected() ? "OK" : "KI");
   } else {
     display.setCursor(0, 20);
     display.setTextSize(1);
-    display.println("WiFi kapcsolodas...");
+    display.println("AP: 192.168.4.1 (OK)");
     display.setCursor(0, 34);
-    display.print("SSID: ");
-    display.println(ssid);
+    display.println("STA Wi-Fi kapcsolodas...");
   }
 
   // Alsó Uptime sáv
   display.setCursor(0, 57);
-  display.printf("Up: %lus | Broker: .253\n", millis() / 1000);
+  display.printf("Up: %lus | Gomb:%d | LED:%s\n", millis() / 1000, buttonPressCount, ledState ? "BE" : "KI");
 
   display.display();
 }
 
 void parseP1Line(String line) {
-  // 1-0:1.7.0(00.450*kW) -> Aktuális fogyasztás
   if (line.indexOf("1-0:1.7.0") >= 0) {
     int start = line.indexOf('(');
     int end = line.indexOf("*kW");
@@ -148,7 +154,6 @@ void parseP1Line(String line) {
       p1_current_power_kw = line.substring(start + 1, end).toFloat();
     }
   }
-  // 1-0:1.8.1(001234.567*kWh) vagy 1-0:1.8.0 -> Összes fogyasztás
   else if (line.indexOf("1-0:1.8.1") >= 0 || line.indexOf("1-0:1.8.0") >= 0) {
     int start = line.indexOf('(');
     int end = line.indexOf("*kWh");
@@ -156,7 +161,6 @@ void parseP1Line(String line) {
       p1_total_energy_kwh = line.substring(start + 1, end).toFloat();
     }
   }
-  // 1-0:2.7.0(00.000*kW) -> Aktuális napelem/visszatáplálás
   else if (line.indexOf("2-0:2.7.0") >= 0 || line.indexOf("1-0:2.7.0") >= 0) {
     int start = line.indexOf('(');
     int end = line.indexOf("*kW");
@@ -206,6 +210,7 @@ void publishMQTTTelemetry() {
   payload += "\"p1_current_export_kw\":" + String(p1_current_export_kw, 3) + ",";
   payload += "\"p1_telegram_count\":" + String(p1_telegram_count) + ",";
   payload += "\"ip_address\":\"" + WiFi.localIP().toString() + "\",";
+  payload += "\"ap_ip_address\":\"" + WiFi.softAPIP().toString() + "\",";
   payload += "\"mac_address\":\"" + WiFi.macAddress() + "\",";
   payload += "\"reset_reason\":\"" + String(getResetReasonString()) + "\",";
   payload += "\"uptime_sec\":" + String(millis() / 1000);
@@ -213,7 +218,7 @@ void publishMQTTTelemetry() {
 
   mqttClient.publish(mqtt_topic_telemetry, payload.c_str());
   mqttClient.publish(mqtt_topic_state, ledState ? "ON" : "OFF");
-  Serial.println("📤 Raspberry Pi MQTT Telemetria + P1 adatok kiküldve: " + payload);
+  Serial.println("📤 MQTT Telemetria kiküldve: " + payload);
 }
 
 void reconnectMQTT() {
@@ -222,7 +227,7 @@ void reconnectMQTT() {
   if (!mqttClient.connected()) {
     if (millis() - lastMqttReconnectAttempt > 5000) {
       lastMqttReconnectAttempt = millis();
-      Serial.printf("🔌 Csatlakozási kísérlet Raspberry Pi MQTT brokerhez (%s:%d)...\n", mqtt_server, mqtt_port);
+      Serial.printf("🔌 Csatlakozás MQTT brokerhez (%s:%d)...\n", mqtt_server, mqtt_port);
       String clientId = "ESP32C3-P1Reader-" + String(random(0xffff), HEX);
       
       bool connected = false;
@@ -233,11 +238,11 @@ void reconnectMQTT() {
       }
 
       if (connected) {
-        Serial.println("✅ Sikeres csatlakozás a Raspberry Pi 24/7 MQTT Brokerhez!");
+        Serial.println("✅ Sikeres csatlakozás az MQTT Brokerhez!");
         mqttClient.subscribe(mqtt_topic_cmd);
         publishMQTTTelemetry();
       } else {
-        Serial.printf("❌ Raspberry Pi MQTT csatlakozási hiba (rc=%d)\n", mqttClient.state());
+        Serial.printf("❌ MQTT csatlakozási hiba (rc=%d)\n", mqttClient.state());
       }
     }
   }
@@ -278,14 +283,14 @@ void handleConfigSave() {
 
 void handleRoot() {
   float tempC = getChipTemperature();
-  String html = "<html><head><title>ESP32-C3 P1 Smart Meter Dashboard</title>";
+  String html = "<html><head><title>ESP32-C3 Dual AP+STA Dashboard</title>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
   html += "<style>body{font-family:Arial;text-align:center;margin-top:30px;background:#121212;color:#fff;}";
   html += ".card{background:#1e1e1e;border-radius:12px;padding:20px;margin:15px auto;max-width:420px;box-shadow:0 4px 10px rgba(0,0,0,0.5);}";
   html += "input{width:80%;padding:10px;margin:5px;border-radius:6px;border:none;}";
   html += ".btn{padding:15px 30px;font-size:18px;background:#00e676;color:#000;border:none;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;}";
   html += ".btn-off{background:#ff5252;color:#fff;}</style></head><body>";
-  html += "<h1>⚡ ESP32-C3 P1 Okosm&eacute;r&odblac; Dashboard</h1>";
+  html += "<h1>📡 ESP32-C3 Dual AP+STA Dashboard</h1>";
 
   html += "<div class='card'>";
   html += "<h2>⚡ P1 Okosm&eacute;r&odblac; Adatok</h2>";
@@ -293,6 +298,14 @@ void handleRoot() {
   html += "<p><b>&Ouml;sszes Fogyaszt&aacute;s:</b> " + String(p1_total_energy_kwh, 1) + " kWh</p>";
   html += "<p><b>Visszat&aacute;pl&aacute;l&aacute;s (Napelem):</b> " + String(p1_current_export_kw, 3) + " kW</p>";
   html += "<p><b>Fogadott Telegramok:</b> #" + String(p1_telegram_count) + "</p>";
+  html += "</div>";
+
+  html += "<div class='card'>";
+  html += "<h2>📡 H&aacute;l&oacute;zati C&iacute;mek (Dual Mode)</h2>";
+  html += "<p><b>Otthoni Wi-Fi IP (STA):</b> " + WiFi.localIP().toString() + "</p>";
+  html += "<p><b>Saj&aacute;t Hotspot IP (AP):</b> " + WiFi.softAPIP().toString() + "</p>";
+  html += "<p><b>Saj&aacute;t Wi-Fi Neve (SSID):</b> " + String(ap_ssid) + "</p>";
+  html += "<p><b>Saj&aacute;t Wi-Fi Jelszava:</b> " + String(ap_pass) + "</p>";
   html += "</div>";
 
   html += "<div class='card'>";
@@ -304,7 +317,7 @@ void handleRoot() {
   html += "<p><b>Jelsz&oacute; (ha van):</b><br><input type='password' name='mqtt_pass' value='" + String(mqtt_pass) + "'></p>";
   html += "<p><input type='submit' class='btn' value='Ment&eacute;s & Csatlakoz&aacute;s'></p>";
   html += "</form>";
-  html += "<p><b>St&aacute;tusz:</b> " + String(mqtt_server) + ":" + String(mqtt_port) + " (" + (mqttClient.connected() ? "<span style='color:#00e676;'>KAPCSOL&Oacute;DVA</span>" : "<span style='color:#ff5252;'>Auth / Hiteles&iacute;t&eacute;s Hiba</span>") + ")</p>";
+  html += "<p><b>St&aacute;tusz:</b> " + String(mqtt_server) + ":" + String(mqtt_port) + " (" + (mqttClient.connected() ? "<span style='color:#00e676;'>KAPCSOL&Oacute;DVA</span>" : "<span style='color:#ff5252;'>Szerver Nem El&eacute;rhető</span>") + ")</p>";
   html += "</div>";
 
   html += "<div class='card'>";
@@ -383,9 +396,19 @@ void setup() {
     updateOLED();
   }
 
+  // DUAL MODE: WIFI_AP_STA (Saját Hotspot ÉS Otthoni Wi-Fi szimultán)
   WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);
   WiFi.setTxPower(WIFI_POWER_13dBm);
+
+  // 1. Saját Access Point elindítása (192.168.4.1)
+  WiFi.softAPConfig(ap_local_ip, ap_gateway, ap_subnet);
+  esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+  WiFi.softAP(ap_ssid, ap_pass, 6, 0, 4);
+  Serial.print("📡 Saját Wi-Fi Hotspot elindult! IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  // 2. Otthoni Wi-Fi-re kapcsolódás (STA Mód)
   WiFi.begin(ssid, password);
 
   mqttClient.setServer(mqtt_server, mqtt_port);
