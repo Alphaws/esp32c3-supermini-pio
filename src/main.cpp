@@ -30,7 +30,7 @@ Preferences preferences;
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-// Dinamikus Wi-Fi Beállítások (Memóriából betöltve)
+// Dinamikus Wi-Fi Beállítások (NVS Memóriából)
 char wifi_ssid[64] = "";
 char wifi_pass[64] = "";
 
@@ -78,7 +78,7 @@ int getRssiPercent(int rssi) {
 }
 
 void loadSettings() {
-  preferences.begin("settings", true);
+  preferences.begin("settings", false); // nvs_open read/write mode for namespace creation
   String s_ssid = preferences.getString("ssid", "");
   String s_pass = preferences.getString("pass", "");
   String s_mqtt = preferences.getString("mqtt_ip", "192.168.0.253");
@@ -146,7 +146,7 @@ void updateOLED() {
 
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.println("ESP32-C3 AP+STA Dual");
+  display.println("ESP32-C3 Smart Meter");
   display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -165,19 +165,19 @@ void updateOLED() {
     display.setCursor(0, 49);
     display.printf("Temp:%.1fC | MQTT:%s\n", tempC, mqttClient.connected() ? "OK" : "KI");
   } else {
-    display.setCursor(0, 20);
-    display.setTextSize(1);
+    display.setCursor(0, 15);
     display.println("AP: 192.168.4.1 (OK)");
-    display.setCursor(0, 34);
+    display.setCursor(0, 27);
+    display.println("SSID: ESP32-SuperMini");
+    display.setCursor(0, 39);
+    display.println("Pass: 12345678");
+    display.setCursor(0, 51);
     if (strlen(wifi_ssid) > 0) {
       display.printf("STA: %s...\n", wifi_ssid);
     } else {
-      display.println("Wi-Fi: Nincs beallitva");
+      display.println("STA: Konfigurasra var");
     }
   }
-
-  display.setCursor(0, 57);
-  display.printf("Up: %lus | Gomb:%d | LED:%s\n", millis() / 1000, buttonPressCount, ledState ? "BE" : "KI");
 
   display.display();
 }
@@ -305,7 +305,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length) {
 
 void handleScan() {
   Serial.println("📡 Wi-Fi hálózatok keresése...");
-  scannedNetworkCount = WiFi.scanNetworks(false, true); // Async scan
+  WiFi.scanNetworks(true); // Async scan
   server.sendHeader("Location", "/");
   server.send(303);
 }
@@ -323,7 +323,7 @@ void handleConfigSave() {
   Serial.printf("⚙️ Új Beállítások: SSID='%s' | MQTT='%s:%d'\n", wifi_ssid, mqtt_server, mqtt_port);
 
   if (strlen(wifi_ssid) > 0) {
-    WiFi.disconnect();
+    WiFi.mode(WIFI_AP_STA);
     WiFi.begin(wifi_ssid, wifi_pass);
   }
 
@@ -479,18 +479,22 @@ void setup() {
     updateOLED();
   }
 
-  // Stabil WIFI_AP_STA inicializálás
+  // 1. Wi-Fi mód beállítása (ha van mentett Wi-Fi -> AP+STA, ha nincs -> tisztán AP)
   WiFi.persistent(false);
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.setTxPower(WIFI_POWER_13dBm);
+  if (strlen(wifi_ssid) > 0) {
+    WiFi.mode(WIFI_AP_STA);
+  } else {
+    WiFi.mode(WIFI_AP);
+  }
+  WiFi.setTxPower(WIFI_POWER_15dBm);
 
-  // Saját Access Point elindítása 1-es csatornán (192.168.4.1)
+  // 2. Saját Access Point elindítása 1-es csatornán (192.168.4.1)
   WiFi.softAPConfig(ap_local_ip, ap_gateway, ap_subnet);
   bool apSuccess = WiFi.softAP(ap_ssid, ap_pass, 1, 0, 4);
   Serial.printf("📡 Saját Wi-Fi Hotspot: %s | IP: %s\n", 
                 apSuccess ? "Sikeres" : "Hiba", WiFi.softAPIP().toString().c_str());
 
-  // Kapcsolódás a mentett Wi-Fi-re (ha van beállítva)
+  // 3. Kapcsolódás a mentett Wi-Fi-re (ha van beállítva)
   if (strlen(wifi_ssid) > 0) {
     Serial.printf("📡 Kapcsolódási kísérlet a mentett Wi-Fi-re: '%s'...\n", wifi_ssid);
     WiFi.begin(wifi_ssid, wifi_pass);
