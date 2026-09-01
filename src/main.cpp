@@ -30,9 +30,12 @@ PubSubClient mqttClient(espClient);
 const char* ssid = "aws01-24";
 const char* password = "1qaw3ed-";
 
-// MQTT beállítások
-char mqtt_server[64] = "192.168.0.140";
+// Raspberry Pi 24/7 Helyi MQTT Broker Beállítások
+char mqtt_server[64] = "192.168.0.253"; // Raspberry Pi 24/7 MQTT Server
 int mqtt_port = 1883;
+char mqtt_user[32] = "";     // Felhasználónév (ha van)
+char mqtt_pass[32] = "";     // Jelszó (ha van)
+
 const char* mqtt_topic_telemetry = "esp32c3/supermini/telemetry";
 const char* mqtt_topic_p1 = "esp32c3/p1/telegram";
 const char* mqtt_topic_state = "esp32c3/supermini/state";
@@ -119,7 +122,7 @@ void updateOLED() {
 
     // 5. Hőmérséklet & Wi-Fi
     display.setCursor(0, 49);
-    display.printf("Temp:%.1fC | WiFi:%d%%\n", tempC, getRssiPercent(rssi));
+    display.printf("Temp:%.1fC | RPi:%s\n", tempC, mqttClient.connected() ? "OK" : "AuthHiba");
   } else {
     display.setCursor(0, 20);
     display.setTextSize(1);
@@ -131,7 +134,7 @@ void updateOLED() {
 
   // Alsó Uptime sáv
   display.setCursor(0, 57);
-  display.printf("Up: %lus | MQTT:%s\n", millis() / 1000, mqttClient.connected() ? "OK" : "KI");
+  display.printf("Up: %lus | Broker: .253\n", millis() / 1000);
 
   display.display();
 }
@@ -170,7 +173,7 @@ void readP1Serial() {
 
     if (c == '\n') {
       p1_raw_buffer.trim();
-      if (p1_raw_buffer.startsWith("!")) { // P1 Telegram vége (!)
+      if (p1_raw_buffer.startsWith("!")) {
         p1_telegram_count++;
         Serial.printf("⚡ P1 Telegram #%d beérkezett!\n", p1_telegram_count);
         updateOLED();
@@ -210,23 +213,31 @@ void publishMQTTTelemetry() {
 
   mqttClient.publish(mqtt_topic_telemetry, payload.c_str());
   mqttClient.publish(mqtt_topic_state, ledState ? "ON" : "OFF");
-  Serial.println("📤 MQTT Telemetria + P1 adatok kiküldve: " + payload);
+  Serial.println("📤 Raspberry Pi MQTT Telemetria + P1 adatok kiküldve: " + payload);
 }
 
 void reconnectMQTT() {
   if (WiFi.status() != WL_CONNECTED) return;
 
   if (!mqttClient.connected()) {
-    if (millis() - lastMqttReconnectAttempt > 10000) {
+    if (millis() - lastMqttReconnectAttempt > 5000) {
       lastMqttReconnectAttempt = millis();
-      Serial.printf("🔌 Csatlakozási kísérlet MQTT brokerhez (%s:%d)...\n", mqtt_server, mqtt_port);
+      Serial.printf("🔌 Csatlakozási kísérlet Raspberry Pi MQTT brokerhez (%s:%d)...\n", mqtt_server, mqtt_port);
       String clientId = "ESP32C3-P1Reader-" + String(random(0xffff), HEX);
-      if (mqttClient.connect(clientId.c_str())) {
-        Serial.println("✅ Sikeres MQTT csatlakozás!");
+      
+      bool connected = false;
+      if (strlen(mqtt_user) > 0) {
+        connected = mqttClient.connect(clientId.c_str(), mqtt_user, mqtt_pass);
+      } else {
+        connected = mqttClient.connect(clientId.c_str());
+      }
+
+      if (connected) {
+        Serial.println("✅ Sikeres csatlakozás a Raspberry Pi 24/7 MQTT Brokerhez!");
         mqttClient.subscribe(mqtt_topic_cmd);
         publishMQTTTelemetry();
       } else {
-        Serial.printf("❌ MQTT csatlakozási hiba (rc=%d)\n", mqttClient.state());
+        Serial.printf("❌ Raspberry Pi MQTT csatlakozási hiba (rc=%d)\n", mqttClient.state());
       }
     }
   }
@@ -251,12 +262,27 @@ void mqttCallback(char* topic, byte* message, unsigned int length) {
   }
 }
 
+void handleConfigSave() {
+  if (server.hasArg("mqtt_server")) strncpy(mqtt_server, server.arg("mqtt_server").c_str(), sizeof(mqtt_server));
+  if (server.hasArg("mqtt_port")) mqtt_port = server.arg("mqtt_port").toInt();
+  if (server.hasArg("mqtt_user")) strncpy(mqtt_user, server.arg("mqtt_user").c_str(), sizeof(mqtt_user));
+  if (server.hasArg("mqtt_pass")) strncpy(mqtt_pass, server.arg("mqtt_pass").c_str(), sizeof(mqtt_pass));
+
+  mqttClient.disconnect();
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  reconnectMQTT();
+
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
 void handleRoot() {
   float tempC = getChipTemperature();
   String html = "<html><head><title>ESP32-C3 P1 Smart Meter Dashboard</title>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
   html += "<style>body{font-family:Arial;text-align:center;margin-top:30px;background:#121212;color:#fff;}";
   html += ".card{background:#1e1e1e;border-radius:12px;padding:20px;margin:15px auto;max-width:420px;box-shadow:0 4px 10px rgba(0,0,0,0.5);}";
+  html += "input{width:80%;padding:10px;margin:5px;border-radius:6px;border:none;}";
   html += ".btn{padding:15px 30px;font-size:18px;background:#00e676;color:#000;border:none;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;}";
   html += ".btn-off{background:#ff5252;color:#fff;}</style></head><body>";
   html += "<h1>⚡ ESP32-C3 P1 Okosm&eacute;r&odblac; Dashboard</h1>";
@@ -270,11 +296,22 @@ void handleRoot() {
   html += "</div>";
 
   html += "<div class='card'>";
+  html += "<h2>⚙️ MQTT Broker Be&aacute;ll&iacute;t&aacute;sok</h2>";
+  html += "<form method='POST' action='/config'>";
+  html += "<p><b>Szerver IP:</b><br><input type='text' name='mqtt_server' value='" + String(mqtt_server) + "'></p>";
+  html += "<p><b>Port:</b><br><input type='text' name='mqtt_port' value='" + String(mqtt_port) + "'></p>";
+  html += "<p><b>Felha&scedil;n&aacute;l&oacute;n&eacute;v (ha van):</b><br><input type='text' name='mqtt_user' value='" + String(mqtt_user) + "'></p>";
+  html += "<p><b>Jelsz&oacute; (ha van):</b><br><input type='password' name='mqtt_pass' value='" + String(mqtt_pass) + "'></p>";
+  html += "<p><input type='submit' class='btn' value='Ment&eacute;s & Csatlakoz&aacute;s'></p>";
+  html += "</form>";
+  html += "<p><b>St&aacute;tusz:</b> " + String(mqtt_server) + ":" + String(mqtt_port) + " (" + (mqttClient.connected() ? "<span style='color:#00e676;'>KAPCSOL&Oacute;DVA</span>" : "<span style='color:#ff5252;'>Auth / Hiteles&iacute;t&eacute;s Hiba</span>") + ")</p>";
+  html += "</div>";
+
+  html += "<div class='card'>";
   html += "<h2>📊 Rendszer Adatok</h2>";
   html += "<p><b>Belső Hőm&eacute;rs&eacute;klet:</b> " + String(tempC, 1) + " &deg;C</p>";
   html += "<p><b>Szabad RAM:</b> " + String(ESP.getFreeHeap() / 1024) + " KB</p>";
   html += "<p><b>Wi-Fi Jeler&odblac;ss&eacute;g:</b> " + String(WiFi.RSSI()) + " dBm (" + String(getRssiPercent(WiFi.RSSI())) + "%)</p>";
-  html += "<p><b>MQTT Broker:</b> " + String(mqtt_server) + ":" + String(mqtt_port) + " (" + (mqttClient.connected() ? "KAPCSOL&Oacute;DVA" : "LECSATLAKOZVA") + ")</p>";
   html += "</div>";
 
   html += "<div class='card'>";
@@ -327,15 +364,13 @@ void setup() {
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
   pinMode(EXT_BUTTON_PIN, INPUT_PULLUP);
 
-  // P1 Port Data Request (RTS Pin 2) beállítása kimenetként (HIGH = Engedélyezés)
   pinMode(P1_RTS_PIN, OUTPUT);
   digitalWrite(P1_RTS_PIN, HIGH);
 
   Serial.begin(115200);
 
-  // P1 Port Hardware UART1 inicializálása GPIO3-on hardveres jelinverzióval (invert = true, DSMR 5.0 115200 8N1)
   Serial1.begin(115200, SERIAL_8N1, P1_RX_PIN, -1, true);
-  Serial.println("⚡ P1 Port UART1 felállt a GPIO3 lábon (hardveresen invertált jel, 115200 baud)!");
+  Serial.println("⚡ P1 Port UART1 felállt a GPIO3 lábon!");
 
   initTempSensor();
 
@@ -357,6 +392,7 @@ void setup() {
   mqttClient.setCallback(mqttCallback);
 
   server.on("/", handleRoot);
+  server.on("/config", HTTP_POST, handleConfigSave);
   server.on("/led/on", handleLedOn);
   server.on("/led/off", handleLedOff);
   server.begin();
@@ -366,7 +402,7 @@ void setup() {
 
 void loop() {
   server.handleClient();
-  readP1Serial(); // P1 Port olvasása
+  readP1Serial();
 
   if (WiFi.status() == WL_CONNECTED) {
     if (!mqttClient.connected()) {
