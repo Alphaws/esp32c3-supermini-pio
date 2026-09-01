@@ -30,7 +30,7 @@ Preferences preferences;
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-// Dinamikus Wi-Fi Beállítások (Memóriából betöltve, nincs beégetve)
+// Dinamikus Wi-Fi Beállítások (Memóriából betöltve)
 char wifi_ssid[64] = "";
 char wifi_pass[64] = "";
 
@@ -61,10 +61,13 @@ unsigned long lastMqttPublish = 0;
 unsigned long lastMqttReconnectAttempt = 0;
 bool tempSensorInitialized = false;
 
+// Wi-Fi pásztázás eredmények
+int scannedNetworkCount = -1;
+
 // P1 Mérőműszer adatok
-float p1_current_power_kw = 0.0;    // 1-0:1.7.0 (Aktuális fogyasztás kW)
-float p1_total_energy_kwh = 0.0;    // 1-0:1.8.0 / 1.8.1 (Összes fogyasztás kWh)
-float p1_current_export_kw = 0.0;   // 1-0:2.7.0 (Aktuális betáplálás kW)
+float p1_current_power_kw = 0.0;
+float p1_total_energy_kwh = 0.0;
+float p1_current_export_kw = 0.0;
 int p1_telegram_count = 0;
 String p1_raw_buffer = "";
 
@@ -300,6 +303,13 @@ void mqttCallback(char* topic, byte* message, unsigned int length) {
   }
 }
 
+void handleScan() {
+  Serial.println("📡 Wi-Fi hálózatok keresése...");
+  scannedNetworkCount = WiFi.scanNetworks(false, true); // Async scan
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
 void handleConfigSave() {
   if (server.hasArg("wifi_ssid")) strncpy(wifi_ssid, server.arg("wifi_ssid").c_str(), sizeof(wifi_ssid));
   if (server.hasArg("wifi_pass")) strncpy(wifi_pass, server.arg("wifi_pass").c_str(), sizeof(wifi_pass));
@@ -310,7 +320,7 @@ void handleConfigSave() {
 
   saveSettings();
 
-  Serial.printf("⚙️ Új Wi-Fi Beállítások: SSID='%s' | MQTT='%s:%d'\n", wifi_ssid, mqtt_server, mqtt_port);
+  Serial.printf("⚙️ Új Beállítások: SSID='%s' | MQTT='%s:%d'\n", wifi_ssid, mqtt_server, mqtt_port);
 
   if (strlen(wifi_ssid) > 0) {
     WiFi.disconnect();
@@ -329,15 +339,13 @@ void handleConfigSave() {
 void handleRoot() {
   float tempC = getChipTemperature();
 
-  // Wi-Fi hálózatok pásztázása a gördülőmenühöz
-  int n = WiFi.scanNetworks();
-
   String html = "<html><head><title>ESP32-C3 Smart Meter Config & Dashboard</title>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
   html += "<style>body{font-family:Arial;text-align:center;margin-top:20px;background:#121212;color:#fff;}";
   html += ".card{background:#1e1e1e;border-radius:12px;padding:20px;margin:15px auto;max-width:440px;box-shadow:0 4px 10px rgba(0,0,0,0.5);}";
   html += "input,select{width:90%;padding:12px;margin:6px 0;border-radius:6px;border:none;background:#2a2a2a;color:#fff;font-size:16px;}";
-  html += ".btn{padding:15px 30px;font-size:18px;background:#00e676;color:#000;border:none;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;font-weight:bold;}";
+  html += ".btn{padding:14px 28px;font-size:16px;background:#00e676;color:#000;border:none;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;font-weight:bold;}";
+  html += ".btn-scan{background:#29b6f6;color:#000;margin-bottom:10px;}";
   html += ".btn-off{background:#ff5252;color:#fff;}</style></head><body>";
   html += "<h1>📡 ESP32-C3 P1 Okosm&eacute;r&odblac;</h1>";
 
@@ -350,15 +358,15 @@ void handleRoot() {
   html += "</div>";
 
   html += "<div class='card'>";
-  html += "<h2>📶 Wi-Fi H&aacute;l&oacute;zat Kiv&aacute;laszt&aacute;sa</h2>";
+  html += "<h2>📶 Wi-Fi H&aacute;l&oacute;zat Be&aacute;ll&iacute;t&aacute;sa</h2>";
+  html += "<p><a href='/scan' class='btn btn-scan'>🔍 Wi-Fi H&aacute;l&oacute;zatok Keres&eacute;se</a></p>";
   html += "<form method='POST' action='/config'>";
-  
-  html += "<p style='text-align:left;margin-left:5%;'><b>L&aacute;that&oacute; Wi-Fi H&aacute;l&oacute;zatok (V&aacute;lassz a list&aacute;b&oacute;l):</b></p>";
-  html += "<select name='wifi_ssid' required>";
-  if (n == 0) {
-    html += "<option value=''>❌ Nem tal&aacute;lhat&oacute; Wi-Fi h&aacute;l&oacute;zat</option>";
-  } else {
-    html += "<option value=''>-- V&aacute;lassz Wi-Fi H&aacute;l&oacute;zatot (" + String(n) + " tal&aacute;lat) --</option>";
+
+  int n = WiFi.scanComplete();
+  if (n >= 0) {
+    html += "<p style='text-align:left;margin-left:5%;'><b>L&aacute;that&oacute; Wi-Fi H&aacute;l&oacute;zatok (" + String(n) + " tal&aacute;lat):</b></p>";
+    html += "<select name='wifi_ssid' required>";
+    html += "<option value=''>-- V&aacute;lassz H&aacute;l&oacute;zatot --</option>";
     for (int i = 0; i < n; ++i) {
       String networkSSID = WiFi.SSID(i);
       int rssi = WiFi.RSSI(i);
@@ -366,8 +374,11 @@ void handleRoot() {
       String isSelected = (networkSSID == wifi_ssid) ? " selected" : "";
       html += "<option value='" + networkSSID + "'" + isSelected + ">" + networkSSID + " (" + String(pct) + "% / " + String(rssi) + " dBm)</option>";
     }
+    html += "</select>";
+  } else {
+    html += "<p style='text-align:left;margin-left:5%;'><b>Wi-Fi SSID (H&aacute;l&oacute;zat neve):</b></p>";
+    html += "<input type='text' name='wifi_ssid' value='" + String(wifi_ssid) + "' placeholder='Írd be vagy keresd ki a Wi-Fi nev&eacute;t' required>";
   }
-  html += "</select>";
 
   html += "<p style='text-align:left;margin-left:5%;margin-top:10px;'><b>Wi-Fi Jelsz&oacute;:</b></p>";
   html += "<input type='password' name='wifi_pass' value='" + String(wifi_pass) + "' placeholder='Add meg a Wi-Fi jelsz&oacute;t'>";
@@ -451,7 +462,7 @@ void setup() {
 
   Serial.begin(115200);
 
-  // Beállítások betöltése NVS memóriából
+  // NVS Memória adatok betöltése
   loadSettings();
 
   Serial1.begin(115200, SERIAL_8N1, P1_RX_PIN, -1, true);
@@ -468,19 +479,18 @@ void setup() {
     updateOLED();
   }
 
-  // DUAL MODE: WIFI_AP_STA
+  // Stabil WIFI_AP_STA inicializálás
   WiFi.persistent(false);
   WiFi.mode(WIFI_AP_STA);
   WiFi.setTxPower(WIFI_POWER_13dBm);
 
-  // 1. Saját Access Point elindítása (192.168.4.1)
+  // Saját Access Point elindítása 1-es csatornán (192.168.4.1)
   WiFi.softAPConfig(ap_local_ip, ap_gateway, ap_subnet);
-  esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
-  WiFi.softAP(ap_ssid, ap_pass, 6, 0, 4);
-  Serial.print("📡 Saját Wi-Fi Hotspot elindult! IP: ");
-  Serial.println(WiFi.softAPIP());
+  bool apSuccess = WiFi.softAP(ap_ssid, ap_pass, 1, 0, 4);
+  Serial.printf("📡 Saját Wi-Fi Hotspot: %s | IP: %s\n", 
+                apSuccess ? "Sikeres" : "Hiba", WiFi.softAPIP().toString().c_str());
 
-  // 2. Csatlakozás az elmentett Wi-Fi-re (ha van elmentve)
+  // Kapcsolódás a mentett Wi-Fi-re (ha van beállítva)
   if (strlen(wifi_ssid) > 0) {
     Serial.printf("📡 Kapcsolódási kísérlet a mentett Wi-Fi-re: '%s'...\n", wifi_ssid);
     WiFi.begin(wifi_ssid, wifi_pass);
@@ -490,6 +500,7 @@ void setup() {
   mqttClient.setCallback(mqttCallback);
 
   server.on("/", handleRoot);
+  server.on("/scan", handleScan);
   server.on("/config", HTTP_POST, handleConfigSave);
   server.on("/led/on", handleLedOn);
   server.on("/led/off", handleLedOff);
