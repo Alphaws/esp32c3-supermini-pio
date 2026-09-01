@@ -303,7 +303,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length) {
 void handleScan() {
   Serial.println("📡 Wi-Fi hálózatok keresése...");
   WiFi.scanNetworks(true); // Async scan
-  server.sendHeader("Location", "/");
+  server.sendHeader("Location", "/settings");
   server.send(303);
 }
 
@@ -329,11 +329,11 @@ void handleConfigSave() {
 
   updateOLED();
 
-  server.sendHeader("Location", "/");
+  server.sendHeader("Location", "/settings");
   server.send(303);
 }
 
-// Élő JSON API Végpont az automatikus frissítéshez
+// Élő JSON API Végpont
 void handleApiData() {
   float tempC = getChipTemperature();
   int freeRamKb = ESP.getFreeHeap() / 1024;
@@ -352,54 +352,100 @@ void handleApiData() {
   json += "\"p1_telegrams\":" + String(p1_telegram_count) + ",";
   json += "\"sta_ip\":\"" + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Csatlakozás...") + "\",";
   json += "\"mqtt_status\":\"" + String(mqttClient.connected() ? "KAPCSOLÓDVA" : "Nem Elérhető") + "\",";
+  json += "\"reset_reason\":\"" + String(getResetReasonString()) + "\",";
   json += "\"uptime_sec\":" + String(millis() / 1000);
   json += "}";
 
   server.send(200, "application/json", json);
 }
 
-void handleRoot() {
-  float tempC = getChipTemperature();
-
+String getHTMLHeader(const char* activeTab) {
   String html = "<!DOCTYPE html><html lang='hu'><head><meta charset='UTF-8'>";
-  html += "<title>ESP32-C3 P1 Okosmérő Dashboard</title>";
+  html += "<title>ESP32-C3 P1 Okosmérő</title>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<style>body{font-family:Arial,sans-serif;text-align:center;margin-top:20px;background:#121212;color:#fff;}";
+  html += "<style>body{font-family:Arial,sans-serif;text-align:center;margin:0;padding:20px;background:#121212;color:#fff;}";
+  html += ".nav{display:flex;justify-content:center;gap:10px;margin-bottom:20px;}";
+  html += ".nav a{padding:12px 20px;background:#2a2a2a;color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;font-size:15px;}";
+  html += ".nav a.active{background:#00e676;color:#000;}";
   html += ".card{background:#1e1e1e;border-radius:12px;padding:20px;margin:15px auto;max-width:440px;box-shadow:0 4px 10px rgba(0,0,0,0.5);}";
   html += "input,select{width:90%;padding:12px;margin:6px 0;border-radius:6px;border:none;background:#2a2a2a;color:#fff;font-size:16px;}";
   html += ".btn{padding:14px 28px;font-size:16px;background:#00e676;color:#000;border:none;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;font-weight:bold;}";
   html += ".btn-scan{background:#29b6f6;color:#000;margin-bottom:10px;}";
   html += ".btn-off{background:#ff5252;color:#fff;}</style>";
 
-  // 2 Másodperces Élő Auto-Refresh JavaScript Ciklus (Oldalújratöltés Nélkül)
-  html += "<script>";
-  html += "function updateData(){";
-  html += "  fetch('/api/data').then(r=>r.json()).then(d=>{";
-  html += "    document.getElementById('p1_power').innerText = d.p1_power_kw.toFixed(3) + ' kW';";
-  html += "    document.getElementById('p1_total').innerText = d.p1_total_kwh.toFixed(1) + ' kWh';";
-  html += "    document.getElementById('p1_export').innerText = d.p1_export_kw.toFixed(3) + ' kW';";
-  html += "    document.getElementById('p1_telegrams').innerText = '#' + d.p1_telegrams;";
-  html += "    document.getElementById('temp_c').innerText = d.temp_c + ' °C';";
-  html += "    document.getElementById('free_ram').innerText = d.free_ram_kb + ' KB';";
-  html += "    document.getElementById('wifi_rssi').innerText = d.rssi_dbm + ' dBm (' + d.rssi_pct + '%)';";
-  html += "    document.getElementById('mqtt_status').innerText = d.mqtt_status;";
-  html += "    document.getElementById('mqtt_status').style.color = (d.mqtt_status==='KAPCSOLÓDVA') ? '#00e676' : '#ff5252';";
-  html += "    document.getElementById('btn_count').innerText = d.button_count;";
-  html += "    document.getElementById('led_status').innerText = d.led_state;";
-  html += "  }).catch(e=>console.log(e));";
-  html += "}";
-  html += "setInterval(updateData, 2000);";
-  html += "</script></head><body>";
+  if (String(activeTab) == "data") {
+    html += "<script>";
+    html += "function updateData(){";
+    html += "  fetch('/api/data').then(r=>r.json()).then(d=>{";
+    html += "    document.getElementById('p1_power').innerText = d.p1_power_kw.toFixed(3) + ' kW';";
+    html += "    document.getElementById('p1_total').innerText = d.p1_total_kwh.toFixed(1) + ' kWh';";
+    html += "    document.getElementById('p1_export').innerText = d.p1_export_kw.toFixed(3) + ' kW';";
+    html += "    document.getElementById('p1_telegrams').innerText = '#' + d.p1_telegrams;";
+    html += "    document.getElementById('btn_count').innerText = d.button_count;";
+    html += "    document.getElementById('led_status').innerText = d.led_state;";
+    html += "  }).catch(e=>console.log(e));";
+    html += "}";
+    html += "setInterval(updateData, 2000);";
+    html += "</script>";
+  } else if (String(activeTab) == "status") {
+    html += "<script>";
+    html += "function updateStatus(){";
+    html += "  fetch('/api/data').then(r=>r.json()).then(d=>{";
+    html += "    document.getElementById('temp_c').innerText = d.temp_c + ' °C';";
+    html += "    document.getElementById('free_ram').innerText = d.free_ram_kb + ' KB';";
+    html += "    document.getElementById('wifi_rssi').innerText = d.rssi_dbm + ' dBm (' + d.rssi_pct + '%)';";
+    html += "    document.getElementById('mqtt_status').innerText = d.mqtt_status;";
+    html += "    document.getElementById('mqtt_status').style.color = (d.mqtt_status==='KAPCSOLÓDVA') ? '#00e676' : '#ff5252';";
+    html += "    document.getElementById('uptime').innerText = d.uptime_sec + 's';";
+    html += "  }).catch(e=>console.log(e));";
+    html += "}";
+    html += "setInterval(updateStatus, 2000);";
+    html += "</script>";
+  }
 
+  html += "</head><body>";
   html += "<h1>🚀 ESP32-C3 P1 Okosmérő</h1>";
+
+  // Navigation Tabs
+  html += "<div class='nav'>";
+  html += "<a href='/' class='" + String(String(activeTab) == "data" ? "active" : "") + "'>⚡ Adatok</a>";
+  html += "<a href='/settings' class='" + String(String(activeTab) == "settings" ? "active" : "") + "'>⚙️ Beállítások</a>";
+  html += "<a href='/status' class='" + String(String(activeTab) == "status" ? "active" : "") + "'>📊 Rendszer Státusz</a>";
+  html += "</div>";
+
+  return html;
+}
+
+// 1. FŐOLDAL: Kizárólag az Okosmérő élő adatai és vezérlése
+void handleRoot() {
+  String html = getHTMLHeader("data");
 
   html += "<div class='card'>";
   html += "<h2>⚡ P1 Okosmérő Adatok (Élő)</h2>";
-  html += "<p><b>Aktuális Fogyasztás:</b> <span id='p1_power' style='font-size:26px;color:#00e676;font-weight:bold;'>" + String(p1_current_power_kw, 3) + " kW</span></p>";
-  html += "<p><b>Összes Fogyasztás:</b> <span id='p1_total'>" + String(p1_total_energy_kwh, 1) + " kWh</span></p>";
-  html += "<p><b>Visszatáplálás (Napelem):</b> <span id='p1_export'>" + String(p1_current_export_kw, 3) + " kW</span></p>";
+  html += "<p><b>Aktuális Fogyasztás:</b> <span id='p1_power' style='font-size:28px;color:#00e676;font-weight:bold;'>" + String(p1_current_power_kw, 3) + " kW</span></p>";
+  html += "<p><b>Összes Fogyasztás:</b> <span id='p1_total' style='font-size:20px;'>" + String(p1_total_energy_kwh, 1) + " kWh</span></p>";
+  html += "<p><b>Visszatáplálás (Napelem):</b> <span id='p1_export' style='font-size:20px;'>" + String(p1_current_export_kw, 3) + " kW</span></p>";
   html += "<p><b>Fogadott Telegramok:</b> <span id='p1_telegrams'>#" + String(p1_telegram_count) + "</span></p>";
   html += "</div>";
+
+  html += "<div class='card'>";
+  html += "<h2>💡 Vezérlés</h2>";
+  html += "<p><b>Gomb megnyomva:</b> <span id='btn_count'>" + String(buttonPressCount) + "</span> alkalommal</p>";
+  html += "<p><b>Fedélzeti LED:</b> <span id='led_status'>" + String(ledState ? "BEKAPCSOLVA" : "KIKAPCSOLVA") + "</span></p>";
+  if (ledState) {
+    html += "<p><a href='/led/off' class='btn btn-off'>LED KIKAPCSOLÁSA</a></p>";
+  } else {
+    html += "<p><a href='/led/on' class='btn'>LED BEKAPCSOLÁSA</a></p>";
+  }
+  html += "</div>";
+
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+// 2. BEÁLLÍTÁSOK OLDAL: Külön a Wi-Fi és MQTT konfiguráció
+void handleSettingsPage() {
+  String html = getHTMLHeader("settings");
 
   html += "<div class='card'>";
   html += "<h2>📶 Wi-Fi Hálózat Beállítása</h2>";
@@ -441,6 +487,15 @@ void handleRoot() {
   html += "</form>";
   html += "</div>";
 
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+// 3. RENDSZER STÁTUSZ OLDAL: Külön a technikai adatok és állapotok
+void handleStatusPage() {
+  float tempC = getChipTemperature();
+  String html = getHTMLHeader("status");
+
   html += "<div class='card'>";
   html += "<h2>📊 Rendszer Státusz (Élő)</h2>";
   html += "<p><b>Otthoni Wi-Fi (STA):</b> " + (WiFi.status() == WL_CONNECTED ? "<span style='color:#00e676;'>" + String(wifi_ssid) + " (" + WiFi.localIP().toString() + ")</span>" : "<span style='color:#ff5252;'>Nincs kapcsolódva (" + String(wifi_ssid) + ")</span>") + "</p>";
@@ -449,17 +504,9 @@ void handleRoot() {
   html += "<p><b>Belső Hőmérséklet:</b> <span id='temp_c'>" + String(tempC, 1) + " °C</span></p>";
   html += "<p><b>Szabad RAM:</b> <span id='free_ram'>" + String(ESP.getFreeHeap() / 1024) + " KB</span></p>";
   html += "<p><b>Wi-Fi Jelerősség:</b> <span id='wifi_rssi'>" + String(WiFi.RSSI()) + " dBm (" + String(getRssiPercent(WiFi.RSSI())) + "%)</span></p>";
-  html += "</div>";
-
-  html += "<div class='card'>";
-  html += "<h2>💡 Vezérlés</h2>";
-  html += "<p><b>Gomb megnyomva:</b> <span id='btn_count'>" + String(buttonPressCount) + "</span> alkalommal</p>";
-  html += "<p><b>Fedélzeti LED:</b> <span id='led_status'>" + String(ledState ? "BEKAPCSOLVA" : "KIKAPCSOLVA") + "</span></p>";
-  if (ledState) {
-    html += "<p><a href='/led/off' class='btn btn-off'>LED KIKAPCSOLÁSA</a></p>";
-  } else {
-    html += "<p><a href='/led/on' class='btn'>LED BEKAPCSOLÁSA</a></p>";
-  }
+  html += "<p><b>Reset Ok:</b> " + String(getResetReasonString()) + "</p>";
+  html += "<p><b>Uptime:</b> <span id='uptime'>" + String(millis() / 1000) + "s</span></p>";
+  html += "<p><b>MAC Cím:</b> " + WiFi.macAddress() + "</p>";
   html += "</div>";
 
   html += "</body></html>";
@@ -543,7 +590,9 @@ void setup() {
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
 
-  server.on("/", handleRoot);
+  server.on("/", handleRoot);                  // 1. Főoldal: Kizárólag az élő adatok
+  server.on("/settings", handleSettingsPage);  // 2. Beállítások oldal
+  server.on("/status", handleStatusPage);      // 3. Rendszer Státusz oldal
   server.on("/api/data", handleApiData);
   server.on("/scan", handleScan);
   server.on("/config", HTTP_POST, handleConfigSave);
