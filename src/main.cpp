@@ -16,12 +16,20 @@
 #define EXT_BUTTON_PIN   4
 #define LED_PIN          8
 
-// P1 Okosmérő (DSMR) Csatlakozás
 #define P1_RX_PIN        3  // RJ12 Pin 5 (Inverted Data) -> ESP32-C3 GPIO3
 #define P1_RTS_PIN       7  // RJ12 Pin 2 (Data Request)  -> ESP32-C3 GPIO7 (HIGH)
 
 #define SCREEN_WIDTH     128
 #define SCREEN_HEIGHT    64
+#define MAX_SAVED_WIFI   10
+
+struct WifiCred {
+  char ssid[32];
+  char pass[64];
+};
+
+WifiCred savedNetworks[MAX_SAVED_WIFI];
+int savedNetworkCount = 0;
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 WebServer server(80);
@@ -30,9 +38,9 @@ Preferences preferences;
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-// Dinamikus Wi-Fi Beállítások (NVS Memóriából)
-char wifi_ssid[64] = "";
-char wifi_pass[64] = "";
+// Aktuális Wi-Fi Beállítások
+char active_ssid[64] = "";
+char active_pass[64] = "";
 
 // Saját Hotspot (AP Mód) Beállítások
 const char* ap_ssid = "ESP32-SuperMini";
@@ -74,36 +82,95 @@ int getRssiPercent(int rssi) {
   return 2 * (rssi + 100);
 }
 
+bool isSavedWifi(const char* ssidCheck) {
+  for (int i = 0; i < savedNetworkCount; i++) {
+    if (strcmp(savedNetworks[i].ssid, ssidCheck) == 0) return true;
+  }
+  return false;
+}
+
+const char* getSavedPass(const char* ssidCheck) {
+  for (int i = 0; i < savedNetworkCount; i++) {
+    if (strcmp(savedNetworks[i].ssid, ssidCheck) == 0) return savedNetworks[i].pass;
+  }
+  return "";
+}
+
+void addOrUpdateSavedWifi(const char* ssidAdd, const char* passAdd) {
+  if (strlen(ssidAdd) == 0) return;
+
+  // Frissítés ha létezik
+  for (int i = 0; i < savedNetworkCount; i++) {
+    if (strcmp(savedNetworks[i].ssid, ssidAdd) == 0) {
+      strncpy(savedNetworks[i].pass, passAdd, sizeof(savedNetworks[i].pass));
+      return;
+    }
+  }
+
+  // Új hozzáadása
+  if (savedNetworkCount < MAX_SAVED_WIFI) {
+    strncpy(savedNetworks[savedNetworkCount].ssid, ssidAdd, sizeof(savedNetworks[savedNetworkCount].ssid));
+    strncpy(savedNetworks[savedNetworkCount].pass, passAdd, sizeof(savedNetworks[savedNetworkCount].pass));
+    savedNetworkCount++;
+  } else {
+    // Ha tele van, a legrégebbit felülírja
+    for (int i = 0; i < MAX_SAVED_WIFI - 1; i++) {
+      savedNetworks[i] = savedNetworks[i + 1];
+    }
+    strncpy(savedNetworks[MAX_SAVED_WIFI - 1].ssid, ssidAdd, sizeof(savedNetworks[MAX_SAVED_WIFI - 1].ssid));
+    strncpy(savedNetworks[MAX_SAVED_WIFI - 1].pass, passAdd, sizeof(savedNetworks[MAX_SAVED_WIFI - 1].pass));
+  }
+}
+
 void loadSettings() {
   preferences.begin("settings", false);
-  String s_ssid = preferences.getString("ssid", "");
-  String s_pass = preferences.getString("pass", "");
+  
+  savedNetworkCount = preferences.getInt("net_count", 0);
+  if (savedNetworkCount > MAX_SAVED_WIFI) savedNetworkCount = MAX_SAVED_WIFI;
+
+  for (int i = 0; i < savedNetworkCount; i++) {
+    String s_ssid = preferences.getString(("s_ssid_" + String(i)).c_str(), "");
+    String s_pass = preferences.getString(("s_pass_" + String(i)).c_str(), "");
+    strncpy(savedNetworks[i].ssid, s_ssid.c_str(), sizeof(savedNetworks[i].ssid));
+    strncpy(savedNetworks[i].pass, s_pass.c_str(), sizeof(savedNetworks[i].pass));
+  }
+
+  String s_active = preferences.getString("active_ssid", "");
+  String s_apass = preferences.getString("active_pass", "");
+  strncpy(active_ssid, s_active.c_str(), sizeof(active_ssid));
+  strncpy(active_pass, s_apass.c_str(), sizeof(active_pass));
+
   String s_mqtt = preferences.getString("mqtt_ip", "192.168.0.253");
   int s_port = preferences.getInt("mqtt_port", 1883);
   String s_user = preferences.getString("mqtt_user", "");
   String s_mpass = preferences.getString("mqtt_pass", "");
   preferences.end();
 
-  strncpy(wifi_ssid, s_ssid.c_str(), sizeof(wifi_ssid));
-  strncpy(wifi_pass, s_pass.c_str(), sizeof(wifi_pass));
   strncpy(mqtt_server, s_mqtt.c_str(), sizeof(mqtt_server));
   mqtt_port = s_port;
   strncpy(mqtt_user, s_user.c_str(), sizeof(mqtt_user));
   strncpy(mqtt_pass, s_mpass.c_str(), sizeof(mqtt_pass));
 
-  Serial.printf("💾 Beállítások betöltve: Wi-Fi='%s' | MQTT='%s:%d'\n", wifi_ssid, mqtt_server, mqtt_port);
+  Serial.printf("💾 Beállítások betöltve: %d elmentett Wi-Fi | MQTT='%s:%d'\n", savedNetworkCount, mqtt_server, mqtt_port);
 }
 
 void saveSettings() {
   preferences.begin("settings", false);
-  preferences.putString("ssid", wifi_ssid);
-  preferences.putString("pass", wifi_pass);
+  
+  preferences.putInt("net_count", savedNetworkCount);
+  for (int i = 0; i < savedNetworkCount; i++) {
+    preferences.putString(("s_ssid_" + String(i)).c_str(), savedNetworks[i].ssid);
+    preferences.putString(("s_pass_" + String(i)).c_str(), savedNetworks[i].pass);
+  }
+
+  preferences.putString("active_ssid", active_ssid);
+  preferences.putString("active_pass", active_pass);
   preferences.putString("mqtt_ip", mqtt_server);
   preferences.putInt("mqtt_port", mqtt_port);
   preferences.putString("mqtt_user", mqtt_user);
   preferences.putString("mqtt_pass", mqtt_pass);
   preferences.end();
-  Serial.println("💾 Új beállítások elmentve az NVS memóriába!");
+  Serial.println("💾 Minden Wi-Fi és MQTT beállítás elmentve az NVS memóriába!");
 }
 
 void initTempSensor() {
@@ -169,8 +236,8 @@ void updateOLED() {
     display.setCursor(0, 39);
     display.println("Pass: 12345678");
     display.setCursor(0, 51);
-    if (strlen(wifi_ssid) > 0) {
-      display.printf("STA: %s...\n", wifi_ssid);
+    if (strlen(active_ssid) > 0) {
+      display.printf("STA: %s...\n", active_ssid);
     } else {
       display.println("STA: Konfigurasra var");
     }
@@ -308,20 +375,22 @@ void handleScan() {
 }
 
 void handleConfigSave() {
-  if (server.hasArg("wifi_ssid")) strncpy(wifi_ssid, server.arg("wifi_ssid").c_str(), sizeof(wifi_ssid));
-  if (server.hasArg("wifi_pass")) strncpy(wifi_pass, server.arg("wifi_pass").c_str(), sizeof(wifi_pass));
+  if (server.hasArg("wifi_ssid")) strncpy(active_ssid, server.arg("wifi_ssid").c_str(), sizeof(active_ssid));
+  if (server.hasArg("wifi_pass")) strncpy(active_pass, server.arg("wifi_pass").c_str(), sizeof(active_pass));
   if (server.hasArg("mqtt_server")) strncpy(mqtt_server, server.arg("mqtt_server").c_str(), sizeof(mqtt_server));
   if (server.hasArg("mqtt_port")) mqtt_port = server.arg("mqtt_port").toInt();
   if (server.hasArg("mqtt_user")) strncpy(mqtt_user, server.arg("mqtt_user").c_str(), sizeof(mqtt_user));
   if (server.hasArg("mqtt_pass")) strncpy(mqtt_pass, server.arg("mqtt_pass").c_str(), sizeof(mqtt_pass));
 
+  // Elmentjük a sikeres Wi-Fi csatlakozáshoz
+  addOrUpdateSavedWifi(active_ssid, active_pass);
   saveSettings();
 
-  Serial.printf("⚙️ Új Beállítások: SSID='%s' | MQTT='%s:%d'\n", wifi_ssid, mqtt_server, mqtt_port);
+  Serial.printf("⚙️ Új Beállítások: SSID='%s' | MQTT='%s:%d'\n", active_ssid, mqtt_server, mqtt_port);
 
-  if (strlen(wifi_ssid) > 0) {
+  if (strlen(active_ssid) > 0) {
     WiFi.mode(WIFI_AP_STA);
-    WiFi.begin(wifi_ssid, wifi_pass);
+    WiFi.begin(active_ssid, active_pass);
   }
 
   mqttClient.disconnect();
@@ -369,11 +438,12 @@ String getHTMLHeader(const char* activeTab) {
   html += ".nav a.active{background:#00e676;color:#000;}";
   html += ".card{background:#1e1e1e;border-radius:12px;padding:20px;margin:15px auto;max-width:440px;box-shadow:0 4px 10px rgba(0,0,0,0.5);}";
   html += ".wifi-item{display:flex;justify-content:space-between;align-items:center;padding:12px;margin:8px 0;background:#2a2a2a;border-radius:8px;cursor:pointer;text-align:left;border:2px solid transparent;}";
-  html += ".wifi-item.saved{border-color:#00e676;background:#1b382b;}";
+  html += ".wifi-item.connected{border-color:#00e676;background:#1b382b;}";
+  html += ".wifi-item.saved{border-color:#29b6f6;}";
   html += ".wifi-item:hover{background:#3a3a3a;}";
   html += ".badge{padding:4px 8px;border-radius:6px;font-size:12px;font-weight:bold;}";
-  html += ".badge-saved{background:#00e676;color:#000;}";
-  html += ".badge-open{background:#ffb300;color:#000;}";
+  html += ".badge-conn{background:#00e676;color:#000;}";
+  html += ".badge-saved{background:#29b6f6;color:#000;}";
   html += "input,select{width:90%;padding:12px;margin:6px 0;border-radius:6px;border:none;background:#2a2a2a;color:#fff;font-size:16px;}";
   html += ".btn{padding:14px 28px;font-size:16px;background:#00e676;color:#000;border:none;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;font-weight:bold;}";
   html += ".btn-scan{background:#29b6f6;color:#000;margin-bottom:15px;}";
@@ -410,8 +480,9 @@ String getHTMLHeader(const char* activeTab) {
   }
 
   html += "<script>";
-  html += "function selectSSID(ssid){";
+  html += "function selectSSID(ssid, pass){";
   html += "  document.getElementById('wifi_ssid_input').value = ssid;";
+  html += "  document.getElementById('wifi_pass_input').value = pass;";
   html += "  document.getElementById('wifi_pass_input').focus();";
   html += "}";
   html += "</script>";
@@ -419,7 +490,6 @@ String getHTMLHeader(const char* activeTab) {
   html += "</head><body>";
   html += "<h1>🚀 ESP32-C3 P1 Okosmérő</h1>";
 
-  // Navigation Tabs
   html += "<div class='nav'>";
   html += "<a href='/' class='" + String(String(activeTab) == "data" ? "active" : "") + "'>⚡ Adatok</a>";
   html += "<a href='/settings' class='" + String(String(activeTab) == "settings" ? "active" : "") + "'>⚙️ Beállítások</a>";
@@ -456,35 +526,36 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
-// 2. BEÁLLÍTÁSOK OLDAL: Ubuntu stílusú Wi-Fi Hálózat Választó + "ELMENTVE / KAPCSOLÓDVA" jelzés
+// 2. BEÁLLÍTÁSOK OLDAL: Ubuntu stílusú Multi Wi-Fi Választó
 void handleSettingsPage() {
   String html = getHTMLHeader("settings");
 
   html += "<div class='card'>";
-  html += "<h2>📶 Wi-Fi Hálózat Választó (Ubuntu Stílus)</h2>";
+  html += "<h2>📶 Wi-Fi Hálózatok (" + String(savedNetworkCount) + " elmentve)</h2>";
   html += "<p><a href='/scan' class='btn btn-scan'>🔍 Wi-Fi Hálózatok Keresése</a></p>";
 
   int n = WiFi.scanComplete();
   if (n >= 0) {
-    html += "<div style='max-height:260px;overflow-y:auto;margin-bottom:15px;'>";
+    html += "<div style='max-height:280px;overflow-y:auto;margin-bottom:15px;'>";
     for (int i = 0; i < n; ++i) {
       String netSSID = WiFi.SSID(i);
       int rssi = WiFi.RSSI(i);
       int pct = getRssiPercent(rssi);
-      bool isSaved = (netSSID == wifi_ssid);
+      bool isConn = (WiFi.status() == WL_CONNECTED && netSSID == active_ssid);
+      bool isSaved = isSavedWifi(netSSID.c_str());
+      const char* savedPass = getSavedPass(netSSID.c_str());
 
-      html += "<div class='wifi-item " + String(isSaved ? "saved" : "") + "' onclick='selectSSID(\"" + netSSID + "\")'>";
+      String cardClass = isConn ? "connected" : (isSaved ? "saved" : "");
+      html += "<div class='wifi-item " + cardClass + "' onclick='selectSSID(\"" + netSSID + "\", \"" + String(savedPass) + "\")'>";
       html += "<div>";
       html += "<div style='font-size:16px;font-weight:bold;'>" + netSSID + "</div>";
       html += "<div style='font-size:12px;color:#aaa;'>Jelerősség: " + String(pct) + "% (" + String(rssi) + " dBm)</div>";
       html += "</div>";
       html += "<div>";
-      if (isSaved) {
-        if (WiFi.status() == WL_CONNECTED) {
-          html += "<span class='badge badge-saved'>✓ KAPCSOLÓDVA</span>";
-        } else {
-          html += "<span class='badge badge-saved'>✓ ELMENTVE</span>";
-        }
+      if (isConn) {
+        html += "<span class='badge badge-conn'>✓ KAPCSOLÓDVA</span>";
+      } else if (isSaved) {
+        html += "<span class='badge badge-saved'>✓ ELMENTVE</span>";
       }
       html += "</div>";
       html += "</div>";
@@ -494,10 +565,10 @@ void handleSettingsPage() {
 
   html += "<form method='POST' action='/config'>";
   html += "<p style='text-align:left;margin-left:5%;'><b>Kiválasztott Wi-Fi SSID:</b></p>";
-  html += "<input type='text' id='wifi_ssid_input' name='wifi_ssid' value='" + String(wifi_ssid) + "' placeholder='Válassz a fenti listából vagy írd be' required>";
+  html += "<input type='text' id='wifi_ssid_input' name='wifi_ssid' value='" + String(active_ssid) + "' placeholder='Válassz a fenti listából vagy írd be' required>";
 
   html += "<p style='text-align:left;margin-left:5%;margin-top:10px;'><b>Wi-Fi Jelszó:</b></p>";
-  html += "<input type='password' id='wifi_pass_input' name='wifi_pass' value='" + String(wifi_pass) + "' placeholder='Add meg a Wi-Fi jelszót'>";
+  html += "<input type='password' id='wifi_pass_input' name='wifi_pass' value='" + String(active_pass) + "' placeholder='Add meg a Wi-Fi jelszót'>";
 
   html += "<h2 style='margin-top:25px;'>🔌 MQTT Broker Beállítások</h2>";
   html += "<p style='text-align:left;margin-left:5%;'><b>MQTT Szerver IP:</b></p>";
@@ -524,7 +595,8 @@ void handleStatusPage() {
 
   html += "<div class='card'>";
   html += "<h2>📊 Rendszer Státusz (Élő)</h2>";
-  html += "<p><b>Otthoni Wi-Fi (STA):</b> " + (WiFi.status() == WL_CONNECTED ? "<span style='color:#00e676;'>" + String(wifi_ssid) + " (" + WiFi.localIP().toString() + ")</span>" : "<span style='color:#ff5252;'>Nincs kapcsolódva (" + String(wifi_ssid) + ")</span>") + "</p>";
+  html += "<p><b>Otthoni Wi-Fi (STA):</b> " + (WiFi.status() == WL_CONNECTED ? "<span style='color:#00e676;'>" + String(active_ssid) + " (" + WiFi.localIP().toString() + ")</span>" : "<span style='color:#ff5252;'>Nincs kapcsolódva (" + String(active_ssid) + ")</span>") + "</p>";
+  html += "<p><b>Elmentett Wi-Fi Hálózatok:</b> " + String(savedNetworkCount) + " db elmentve az NVS-ben</p>";
   html += "<p><b>Saját Hotspot (AP):</b> " + WiFi.softAPIP().toString() + " (SSID: " + String(ap_ssid) + ")</p>";
   html += "<p><b>MQTT Broker Státusz:</b> <span id='mqtt_status' style='color:" + String(mqttClient.connected() ? "#00e676" : "#ff5252") + ";'>" + String(mqttClient.connected() ? "KAPCSOLÓDVA" : "Nem Elérhető") + "</span></p>";
   html += "<p><b>Belső Hőmérséklet:</b> <span id='temp_c'>" + String(tempC, 1) + " °C</span></p>";
@@ -596,7 +668,7 @@ void setup() {
   }
 
   WiFi.persistent(false);
-  if (strlen(wifi_ssid) > 0) {
+  if (strlen(active_ssid) > 0 || savedNetworkCount > 0) {
     WiFi.mode(WIFI_AP_STA);
   } else {
     WiFi.mode(WIFI_AP);
@@ -608,9 +680,9 @@ void setup() {
   Serial.printf("📡 Saját Wi-Fi Hotspot: %s | IP: %s\n", 
                 apSuccess ? "Sikeres" : "Hiba", WiFi.softAPIP().toString().c_str());
 
-  if (strlen(wifi_ssid) > 0) {
-    Serial.printf("📡 Kapcsolódási kísérlet a mentett Wi-Fi-re: '%s'...\n", wifi_ssid);
-    WiFi.begin(wifi_ssid, wifi_pass);
+  if (strlen(active_ssid) > 0) {
+    Serial.printf("📡 Kapcsolódási kísérlet az aktív Wi-Fi-re: '%s'...\n", active_ssid);
+    WiFi.begin(active_ssid, active_pass);
   }
 
   mqttClient.setServer(mqtt_server, mqtt_port);
