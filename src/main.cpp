@@ -6,6 +6,8 @@
 #include <WebServer.h>
 #include <PubSubClient.h>
 #include <Preferences.h>
+#include <Update.h>
+#include <ArduinoOTA.h>
 #include <driver/temp_sensor.h>
 #include <esp_system.h>
 #include <esp_wifi.h>
@@ -99,7 +101,6 @@ const char* getSavedPass(const char* ssidCheck) {
 void addOrUpdateSavedWifi(const char* ssidAdd, const char* passAdd) {
   if (strlen(ssidAdd) == 0) return;
 
-  // Frissítés ha létezik
   for (int i = 0; i < savedNetworkCount; i++) {
     if (strcmp(savedNetworks[i].ssid, ssidAdd) == 0) {
       strncpy(savedNetworks[i].pass, passAdd, sizeof(savedNetworks[i].pass));
@@ -107,13 +108,11 @@ void addOrUpdateSavedWifi(const char* ssidAdd, const char* passAdd) {
     }
   }
 
-  // Új hozzáadása
   if (savedNetworkCount < MAX_SAVED_WIFI) {
     strncpy(savedNetworks[savedNetworkCount].ssid, ssidAdd, sizeof(savedNetworks[savedNetworkCount].ssid));
     strncpy(savedNetworks[savedNetworkCount].pass, passAdd, sizeof(savedNetworks[savedNetworkCount].pass));
     savedNetworkCount++;
   } else {
-    // Ha tele van, a legrégebbit felülírja
     for (int i = 0; i < MAX_SAVED_WIFI - 1; i++) {
       savedNetworks[i] = savedNetworks[i + 1];
     }
@@ -380,9 +379,8 @@ void handleConfigSave() {
   if (server.hasArg("mqtt_server")) strncpy(mqtt_server, server.arg("mqtt_server").c_str(), sizeof(mqtt_server));
   if (server.hasArg("mqtt_port")) mqtt_port = server.arg("mqtt_port").toInt();
   if (server.hasArg("mqtt_user")) strncpy(mqtt_user, server.arg("mqtt_user").c_str(), sizeof(mqtt_user));
-  if (server.hasArg("mqtt_pass")) strncpy(mqtt_pass, server.arg("mqtt_pass").c_str(), sizeof(mqtt_pass));
+  if (server.hasArg("mqtt_pass")) strncpy(mqtt_pass, server.arg("wifi_pass").c_str(), sizeof(mqtt_pass));
 
-  // Elmentjük a sikeres Wi-Fi csatlakozáshoz
   addOrUpdateSavedWifi(active_ssid, active_pass);
   saveSettings();
 
@@ -447,6 +445,7 @@ String getHTMLHeader(const char* activeTab) {
   html += "input,select{width:90%;padding:12px;margin:6px 0;border-radius:6px;border:none;background:#2a2a2a;color:#fff;font-size:16px;}";
   html += ".btn{padding:14px 28px;font-size:16px;background:#00e676;color:#000;border:none;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;font-weight:bold;}";
   html += ".btn-scan{background:#29b6f6;color:#000;margin-bottom:15px;}";
+  html += ".btn-ota{background:#ab47bc;color:#fff;margin-top:15px;}";
   html += ".btn-off{background:#ff5252;color:#fff;}</style>";
 
   if (String(activeTab) == "data") {
@@ -526,7 +525,7 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
-// 2. BEÁLLÍTÁSOK OLDAL: Ubuntu stílusú Multi Wi-Fi Választó
+// 2. BEÁLLÍTÁSOK OLDAL
 void handleSettingsPage() {
   String html = getHTMLHeader("settings");
 
@@ -582,6 +581,10 @@ void handleSettingsPage() {
 
   html += "<p style='margin-top:20px;'><input type='submit' class='btn' value='Mentés & Csatlakozás'></p>";
   html += "</form>";
+
+  html += "<h2 style='margin-top:30px;'>🚀 Vezeték Nélküli Frissítés (OTA)</h2>";
+  html += "<p><a href='/update' class='btn btn-ota'>📲 Firmware Feltöltése Wi-Fi-n (.bin)</a></p>";
+
   html += "</div>";
 
   html += "</body></html>";
@@ -599,6 +602,7 @@ void handleStatusPage() {
   html += "<p><b>Elmentett Wi-Fi Hálózatok:</b> " + String(savedNetworkCount) + " db elmentve az NVS-ben</p>";
   html += "<p><b>Saját Hotspot (AP):</b> " + WiFi.softAPIP().toString() + " (SSID: " + String(ap_ssid) + ")</p>";
   html += "<p><b>MQTT Broker Státusz:</b> <span id='mqtt_status' style='color:" + String(mqttClient.connected() ? "#00e676" : "#ff5252") + ";'>" + String(mqttClient.connected() ? "KAPCSOLÓDVA" : "Nem Elérhető") + "</span></p>";
+  html += "<p><b>OTA Wi-Fi Frissítés:</b> <span style='color:#00e676;'>AKTÍV (/update)</span></p>";
   html += "<p><b>Belső Hőmérséklet:</b> <span id='temp_c'>" + String(tempC, 1) + " °C</span></p>";
   html += "<p><b>Szabad RAM:</b> <span id='free_ram'>" + String(ESP.getFreeHeap() / 1024) + " KB</span></p>";
   html += "<p><b>Wi-Fi Jelerősség:</b> <span id='wifi_rssi'>" + String(WiFi.RSSI()) + " dBm (" + String(getRssiPercent(WiFi.RSSI())) + "%)</span></p>";
@@ -608,6 +612,20 @@ void handleStatusPage() {
   html += "</div>";
 
   html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+// 4. OTA WEB FRISSÍTŐ OLDAL
+void handleUpdatePage() {
+  String html = getHTMLHeader("update");
+  html += "<div class='card'>";
+  html += "<h2>📲 Vezeték Nélküli Firmware Frissítés (OTA)</h2>";
+  html += "<p>Válaszd ki a számítógépeden lefordított <b>.pio/build/esp32-c3-supermini/firmware.bin</b> fájlt!</p>";
+  html += "<form method='POST' action='/update' enctype='multipart/form-data'>";
+  html += "<input type='file' name='update' accept='.bin' required style='margin-bottom:20px;'>";
+  html += "<br><input type='submit' class='btn btn-ota' value='🚀 Frissítés Indítása'>";
+  html += "</form>";
+  html += "</div></body></html>";
   server.send(200, "text/html", html);
 }
 
@@ -688,9 +706,44 @@ void setup() {
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
 
+  // ArduinoOTA Beállítása
+  ArduinoOTA.setHostname("esp32c3-p1-meter");
+  ArduinoOTA.onStart([]() {
+    Serial.println("⚡ OTA Frissítés elindult...");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\n✅ OTA Frissítés sikeres!");
+  });
+  ArduinoOTA.begin();
+
   server.on("/", handleRoot);
   server.on("/settings", handleSettingsPage);
   server.on("/status", handleStatusPage);
+  server.on("/update", HTTP_GET, handleUpdatePage);
+  server.on("/update", HTTP_POST, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", "<h2>✅ Sikeres Firmware Frissítés! Az ESP32 újraindul...</h2><script>setTimeout(function(){window.location.href='/';},5000);</script>");
+    ESP.restart();
+  }, []() {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+      Serial.printf("📲 OTA Web Feltöltés indítása: %s\n", upload.filename.c_str());
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_END) {
+      if (Update.end(true)) {
+        Serial.printf("✅ Web OTA Sikeres! Írt méret: %u bájt\n", upload.totalSize);
+      } else {
+        Update.printError(Serial);
+      }
+    }
+  });
+
   server.on("/api/data", handleApiData);
   server.on("/scan", handleScan);
   server.on("/config", HTTP_POST, handleConfigSave);
@@ -704,6 +757,7 @@ void setup() {
 void loop() {
   server.handleClient();
   readP1Serial();
+  ArduinoOTA.handle();
 
   if (WiFi.status() == WL_CONNECTED) {
     if (!mqttClient.connected()) {
@@ -713,7 +767,6 @@ void loop() {
     }
   }
 
-  // MQTT Adatküldés 5 másodpercenként
   if (millis() - lastMqttPublish > 5000) {
     lastMqttPublish = millis();
     if (WiFi.status() == WL_CONNECTED) {
@@ -721,7 +774,6 @@ void loop() {
     }
   }
 
-  // 1. Fedélzeti BOOT gomb (GPIO9)
   bool bootState = digitalRead(BOOT_BUTTON_PIN);
   if (bootState != lastBootState) {
     if ((millis() - lastDebounceTime) > 50) {
@@ -733,7 +785,6 @@ void loop() {
   }
   lastBootState = bootState;
 
-  // 2. Külső gomb (GPIO4)
   bool extState = digitalRead(EXT_BUTTON_PIN);
   if (extState != lastExtState) {
     if ((millis() - lastDebounceTime) > 50) {
@@ -745,7 +796,6 @@ void loop() {
   }
   lastExtState = extState;
 
-  // OLED frissítés 1mp-enként
   static unsigned long lastOledRefresh = 0;
   if (millis() - lastOledRefresh > 1000) {
     lastOledRefresh = millis();
