@@ -28,8 +28,9 @@ WebServer server(80);
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-const char* ssid = "aws01-24";
-const char* password = "1qaw3ed-";
+// Wi-Fi Station (Otthoni Hálózat) Beállítások
+char wifi_ssid[64] = "aws01-24";
+char wifi_pass[64] = "1qaw3ed-";
 
 // Saját Hotspot (AP Mód) Beállítások
 const char* ap_ssid = "ESP32-SuperMini";
@@ -106,7 +107,7 @@ void updateOLED() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
-  // 1. Fejléc (Dual AP+STA Mód)
+  // 1. Fejléc
   display.setTextSize(1);
   display.setCursor(0, 0);
   display.println("ESP32-C3 AP+STA Dual");
@@ -116,15 +117,15 @@ void updateOLED() {
     int rssi = WiFi.RSSI();
     float tempC = getChipTemperature();
 
-    // 2. Wi-Fi IP & AP IP
+    // 2. Wi-Fi IP (STA)
     display.setCursor(0, 13);
     display.printf("STA:%s\n", WiFi.localIP().toString().c_str());
 
-    // 3. AP IP & Hotspot Név
+    // 3. AP IP & P1 Telegramok
     display.setCursor(0, 25);
     display.printf("AP:192.168.4.1 | P1:#%d\n", p1_telegram_count);
 
-    // 4. P1 Aktuális Teljesítmény
+    // 4. P1 Teljesítmény
     display.setCursor(0, 37);
     display.printf("P1 Pwr: %.3f kW\n", p1_current_power_kw);
 
@@ -136,7 +137,7 @@ void updateOLED() {
     display.setTextSize(1);
     display.println("AP: 192.168.4.1 (OK)");
     display.setCursor(0, 34);
-    display.println("STA Wi-Fi kapcsolodas...");
+    display.printf("STA: %s...\n", wifi_ssid);
   }
 
   // Alsó Uptime sáv
@@ -268,14 +269,23 @@ void mqttCallback(char* topic, byte* message, unsigned int length) {
 }
 
 void handleConfigSave() {
+  if (server.hasArg("wifi_ssid")) strncpy(wifi_ssid, server.arg("wifi_ssid").c_str(), sizeof(wifi_ssid));
+  if (server.hasArg("wifi_pass")) strncpy(wifi_pass, server.arg("wifi_pass").c_str(), sizeof(wifi_pass));
   if (server.hasArg("mqtt_server")) strncpy(mqtt_server, server.arg("mqtt_server").c_str(), sizeof(mqtt_server));
   if (server.hasArg("mqtt_port")) mqtt_port = server.arg("mqtt_port").toInt();
   if (server.hasArg("mqtt_user")) strncpy(mqtt_user, server.arg("mqtt_user").c_str(), sizeof(mqtt_user));
   if (server.hasArg("mqtt_pass")) strncpy(mqtt_pass, server.arg("mqtt_pass").c_str(), sizeof(mqtt_pass));
 
+  Serial.printf("⚙️ Új Wi-Fi Beállítások: SSID='%s' | MQTT='%s:%d'\n", wifi_ssid, mqtt_server, mqtt_port);
+
+  // Újracsatlakozás az új Wi-Fi beállításokkal
+  WiFi.disconnect();
+  WiFi.begin(wifi_ssid, wifi_pass);
+
   mqttClient.disconnect();
   mqttClient.setServer(mqtt_server, mqtt_port);
-  reconnectMQTT();
+
+  updateOLED();
 
   server.sendHeader("Location", "/");
   server.send(303);
@@ -283,14 +293,14 @@ void handleConfigSave() {
 
 void handleRoot() {
   float tempC = getChipTemperature();
-  String html = "<html><head><title>ESP32-C3 Dual AP+STA Dashboard</title>";
+  String html = "<html><head><title>ESP32-C3 Smart Meter Config & Dashboard</title>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<style>body{font-family:Arial;text-align:center;margin-top:30px;background:#121212;color:#fff;}";
-  html += ".card{background:#1e1e1e;border-radius:12px;padding:20px;margin:15px auto;max-width:420px;box-shadow:0 4px 10px rgba(0,0,0,0.5);}";
-  html += "input{width:80%;padding:10px;margin:5px;border-radius:6px;border:none;}";
-  html += ".btn{padding:15px 30px;font-size:18px;background:#00e676;color:#000;border:none;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;}";
+  html += "<style>body{font-family:Arial;text-align:center;margin-top:20px;background:#121212;color:#fff;}";
+  html += ".card{background:#1e1e1e;border-radius:12px;padding:20px;margin:15px auto;max-width:440px;box-shadow:0 4px 10px rgba(0,0,0,0.5);}";
+  html += "input,select{width:85%;padding:10px;margin:6px 0;border-radius:6px;border:none;background:#2a2a2a;color:#fff;font-size:16px;}";
+  html += ".btn{padding:15px 30px;font-size:18px;background:#00e676;color:#000;border:none;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;font-weight:bold;}";
   html += ".btn-off{background:#ff5252;color:#fff;}</style></head><body>";
-  html += "<h1>📡 ESP32-C3 Dual AP+STA Dashboard</h1>";
+  html += "<h1>📡 ESP32-C3 P1 Okosm&eacute;r&odblac;</h1>";
 
   html += "<div class='card'>";
   html += "<h2>⚡ P1 Okosm&eacute;r&odblac; Adatok</h2>";
@@ -301,27 +311,34 @@ void handleRoot() {
   html += "</div>";
 
   html += "<div class='card'>";
-  html += "<h2>📡 H&aacute;l&oacute;zati C&iacute;mek (Dual Mode)</h2>";
-  html += "<p><b>Otthoni Wi-Fi IP (STA):</b> " + WiFi.localIP().toString() + "</p>";
-  html += "<p><b>Saj&aacute;t Hotspot IP (AP):</b> " + WiFi.softAPIP().toString() + "</p>";
-  html += "<p><b>Saj&aacute;t Wi-Fi Neve (SSID):</b> " + String(ap_ssid) + "</p>";
-  html += "<p><b>Saj&aacute;t Wi-Fi Jelszava:</b> " + String(ap_pass) + "</p>";
-  html += "</div>";
-
-  html += "<div class='card'>";
-  html += "<h2>⚙️ MQTT Broker Be&aacute;ll&iacute;t&aacute;sok</h2>";
+  html += "<h2>⚙️ Wi-Fi & MQTT Konfigur&aacute;ci&oacute;</h2>";
   html += "<form method='POST' action='/config'>";
-  html += "<p><b>Szerver IP:</b><br><input type='text' name='mqtt_server' value='" + String(mqtt_server) + "'></p>";
-  html += "<p><b>Port:</b><br><input type='text' name='mqtt_port' value='" + String(mqtt_port) + "'></p>";
-  html += "<p><b>Felha&scedil;n&aacute;l&oacute;n&eacute;v (ha van):</b><br><input type='text' name='mqtt_user' value='" + String(mqtt_user) + "'></p>";
-  html += "<p><b>Jelsz&oacute; (ha van):</b><br><input type='password' name='mqtt_pass' value='" + String(mqtt_pass) + "'></p>";
-  html += "<p><input type='submit' class='btn' value='Ment&eacute;s & Csatlakoz&aacute;s'></p>";
+  
+  html += "<h3>📶 Otthoni Wi-Fi Be&aacute;ll&iacute;t&aacute;sok</h3>";
+  html += "<p style='text-align:left;margin-left:8%;'><b>Wi-Fi SSID (H&aacute;l&oacute;zat neve):</b></p>";
+  html += "<input type='text' name='wifi_ssid' value='" + String(wifi_ssid) + "' required>";
+  html += "<p style='text-align:left;margin-left:8%;'><b>Wi-Fi Jelsz&oacute;:</b></p>";
+  html += "<input type='password' name='wifi_pass' value='" + String(wifi_pass) + "' placeholder='Jelsz&oacute;'>";
+
+  html += "<h3 style='margin-top:20px;'>🔌 MQTT Broker Be&aacute;ll&iacute;t&aacute;sok</h3>";
+  html += "<p style='text-align:left;margin-left:8%;'><b>MQTT Szerver IP:</b></p>";
+  html += "<input type='text' name='mqtt_server' value='" + String(mqtt_server) + "' required>";
+  html += "<p style='text-align:left;margin-left:8%;'><b>Port:</b></p>";
+  html += "<input type='text' name='mqtt_port' value='" + String(mqtt_port) + "'>";
+  html += "<p style='text-align:left;margin-left:8%;'><b>MQTT Felha&scedil;n&aacute;l&oacute; (opcion&aacute;lis):</b></p>";
+  html += "<input type='text' name='mqtt_user' value='" + String(mqtt_user) + "'>";
+  html += "<p style='text-align:left;margin-left:8%;'><b>MQTT Jelsz&oacute; (opcion&aacute;lis):</b></p>";
+  html += "<input type='password' name='mqtt_pass' value='" + String(mqtt_pass) + "'>";
+
+  html += "<p style='margin-top:20px;'><input type='submit' class='btn' value='Ment&eacute;s & Csatlakoz&aacute;s'></p>";
   html += "</form>";
-  html += "<p><b>St&aacute;tusz:</b> " + String(mqtt_server) + ":" + String(mqtt_port) + " (" + (mqttClient.connected() ? "<span style='color:#00e676;'>KAPCSOL&Oacute;DVA</span>" : "<span style='color:#ff5252;'>Szerver Nem El&eacute;rhető</span>") + ")</p>";
   html += "</div>";
 
   html += "<div class='card'>";
-  html += "<h2>📊 Rendszer Adatok</h2>";
+  html += "<h2>📊 Rendszer St&aacute;tusz</h2>";
+  html += "<p><b>Otthoni Wi-Fi IP (STA):</b> " + (WiFi.status() == WL_CONNECTED ? "<span style='color:#00e676;'>" + WiFi.localIP().toString() + "</span>" : "<span style='color:#ff5252;'>Csatlakoz&aacute;s...</span>") + "</p>";
+  html += "<p><b>Saj&aacute;t Hotspot IP (AP):</b> " + WiFi.softAPIP().toString() + " (Hotspot: " + String(ap_ssid) + ")</p>";
+  html += "<p><b>MQTT Broker St&aacute;tusz:</b> " + String(mqtt_server) + ":" + String(mqtt_port) + " (" + (mqttClient.connected() ? "<span style='color:#00e676;'>KAPCSOL&Oacute;DVA</span>" : "<span style='color:#ff5252;'>Nem El&eacute;rhető</span>") + ")</p>";
   html += "<p><b>Belső Hőm&eacute;rs&eacute;klet:</b> " + String(tempC, 1) + " &deg;C</p>";
   html += "<p><b>Szabad RAM:</b> " + String(ESP.getFreeHeap() / 1024) + " KB</p>";
   html += "<p><b>Wi-Fi Jeler&odblac;ss&eacute;g:</b> " + String(WiFi.RSSI()) + " dBm (" + String(getRssiPercent(WiFi.RSSI())) + "%)</p>";
@@ -409,7 +426,7 @@ void setup() {
   Serial.println(WiFi.softAPIP());
 
   // 2. Otthoni Wi-Fi-re kapcsolódás (STA Mód)
-  WiFi.begin(ssid, password);
+  WiFi.begin(wifi_ssid, wifi_pass);
 
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
